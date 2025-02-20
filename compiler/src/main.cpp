@@ -5,11 +5,14 @@
 
 #include <iostream>
 
+#include "FunctionDatabase.hpp"
+
+#include "SplitContsIntoFuns.hpp"
+#include "CreateContinuationPaths.hpp"
+#include "EliminateSyncPhis.hpp"
+#include "RemoveJunkCalls.hpp"
 #include "SpawnAnalysis.hpp"
 #include "ValidateCalls.hpp"
-#include "RemoveJunkCalls.hpp"
-#include "EliminateSyncPhis.hpp"
-#include "CreateContinuationFuns.hpp"
 
 int main(int argc, char **argv) {
   if (argc < 2) {
@@ -28,14 +31,27 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  FunctionDatabase fd;
+
   RemoveJunkCalls rj(*llvmModule);
   SpawnAnalysis sa(*llvmModule);
   ValidateCalls vc(*llvmModule, sa);
-  CreateContinuationFuns ccf(*llvmModule, sa);
-  llvmModule->print(outs(), NULL);
   // This pass is not necessary for now because on -O0 phi is not used to merge
   // the path between the continuations. Instead, a local variable is used.
-  //EliminateSyncPhis es(*llvmModule);
+  // EliminateSyncPhis es(*llvmModule);
 
-  
+  std::vector<Function *> workList;
+  for (auto &func : *llvmModule) {
+    workList.push_back(&func);
+  }
+
+  for (auto &func : workList) {
+    if (sa.needsContinuation.find(func) == sa.needsContinuation.end()) {
+      continue;
+    }
+    CreateContinuationPaths ccp(*func);
+    SplitContsIntoFuns scf(*func, ccp);
+  }
+
+  llvmModule->print(outs(), NULL);
 }

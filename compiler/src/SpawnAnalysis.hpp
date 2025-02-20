@@ -1,6 +1,5 @@
 #pragma once
 
-#include <llvm/ADT/MapVector.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Verifier.h>
@@ -89,7 +88,7 @@ private:
 public:
   // Map the basic block corresponding to the detached branch of a detach
   // instruction to the SpawnData.
-  MapVector<BasicBlock *, SpawnData> spawnDataMap;
+  std::unordered_map<BasicBlock *, SpawnData> spawnDataMap;
   // All functions in this set are spawned somewhere
   // and need a continuation as an argument.
   std::set<Function *> needsContinuation;

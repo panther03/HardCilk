@@ -21,7 +21,7 @@ entry:
 if.then:                                          ; preds = %entry
   %1 = load i64, ptr %n.addr, align 8
   store i64 %1, ptr %retval, align 8
-  br label %return
+  br label %return.clone
 
 if.end:                                           ; preds = %entry
   %2 = load i64, ptr %n.addr, align 8
@@ -85,12 +85,15 @@ sync.continue13:                                  ; preds = %det.cont12
 sync.continue15:                                  ; preds = %sync.continue13
   br label %return
 
-return:                                           ; preds = %sync.continue15, %if.then
+return:                                           ; preds = %sync.continue15
   sync within none, label %sync.continue16
 
-sync.continue16:                                  ; preds = %return
+sync.continue16:                                  ; preds = %return.clone, %return
   %11 = load i64, ptr %retval, align 8
   ret i64 %11
+
+return.clone:                                     ; preds = %if.then
+  sync within none, label %sync.continue16
 }
 
 ; Function Attrs: nounwind willreturn memory(argmem: readwrite)
