@@ -1,57 +1,134 @@
-#include <llvm/ADT/MapVector.h>
-#include <llvm/IR/Verifier.h>
-#include <llvm/IRReader/IRReader.h>
-#include <llvm/Support/SourceMgr.h>
+#include <clang/AST/ASTConsumer.h>
+#include <clang/Basic/SourceManager.h>
+#include <clang/Frontend/CompilerInstance.h>
+#include <clang/Tooling/Tooling.h>
+#include <llvm/ADT/IntrusiveRefCntPtr.h>
 
 #include <iostream>
 
-#include "FunctionDatabase.hpp"
+#include "Cilk2IR.hpp"
+#include "IR.hpp"
 
-#include "SplitContsIntoFuns.hpp"
-#include "CreateContinuationPaths.hpp"
-#include "EliminateSyncPhis.hpp"
-#include "RemoveJunkCalls.hpp"
-#include "SpawnAnalysis.hpp"
-#include "ValidateCalls.hpp"
+using namespace clang;
+using namespace clang::tooling;
+using namespace llvm;
+using namespace clang::driver;
 
-int main(int argc, char **argv) {
-  if (argc < 2) {
-    std::cerr << "Expected path to input LLVM bytecode (.ll)." << std::endl;
-    return 1;
-  }
+// static cl::OptionCategory MyToolCategory("cilk2vitis options");
+// static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 
-  std::unique_ptr<llvm::LLVMContext> llvmCtx =
-      std::make_unique<llvm::LLVMContext>();
+class Cilk2Vitis : public clang::ASTConsumer {
+private:
+  clang::ASTContext *Context;
+  PreprocessingRecord *PPRec;
+  SourceManager &SM;
 
-  llvm::SMDiagnostic err;
-  std::unique_ptr<llvm::Module> llvmModule =
-      llvm::parseIRFile(argv[1], err, *llvmCtx);
-  if (!llvmModule || llvm::verifyModule(*llvmModule, &llvm::errs())) {
-    err.print("tapir2vitis", llvm::errs());
-    return 1;
-  }
+  IRProgram P;
+  Cilk2IRVisitor Visitor;
 
-  FunctionDatabase fd;
+public:
+  explicit Cilk2Vitis(clang::ASTContext *Context, PreprocessingRecord *PPRec,
+                      SourceManager &SM)
+      : Context(Context), PPRec(PPRec), SM(SM), Visitor(Context, P) {}
 
-  RemoveJunkCalls rj(*llvmModule);
-  SpawnAnalysis sa(*llvmModule);
-  ValidateCalls vc(*llvmModule, sa);
-  // This pass is not necessary for now because on -O0 phi is not used to merge
-  // the path between the continuations. Instead, a local variable is used.
-  // EliminateSyncPhis es(*llvmModule);
-
-  std::vector<Function *> workList;
-  for (auto &func : *llvmModule) {
-    workList.push_back(&func);
-  }
-
-  for (auto &func : workList) {
-    if (sa.needsContinuation.find(func) == sa.needsContinuation.end()) {
-      continue;
+  void HandleTranslationUnit(clang::ASTContext &Context) {
+    // Only visit declarations declared in the input TU
+    auto Decls = Context.getTranslationUnitDecl()->decls();
+    for (auto &Decl : Decls) {
+      // Ignore declarations out of the main translation unit.
+      //
+      // SourceManager::isInMainFile method takes into account locations
+      // expansion like macro expansion scenario and checks expansion
+      // location instead if spelling location if required.
+      if (!SM.isInMainFile(Decl->getLocation()))
+        continue;
+      Visitor.TraverseDecl(Decl);
     }
-    CreateContinuationPaths ccp(*func);
-    SplitContsIntoFuns scf(*func, ccp);
+    for (auto &F: P.getFuncs()) {
+      for (auto &S: F.get()->getStmts()) {
+        std::cout << "test3" << std::endl;
+      }
+    }
+  }
+};
+
+// Frontened action to create the custom AST consumer
+class Cilk2VitisAction : public clang::ASTFrontendAction {
+public:
+  std::unique_ptr<clang::ASTConsumer>
+  CreateASTConsumer(clang::CompilerInstance &CI, StringRef file) override {
+    clang::Preprocessor &PP = CI.getPreprocessor();
+    PP.enableIncrementalProcessing();
+    if (!PP.getPreprocessingRecord()) {
+      PP.createPreprocessingRecord();
+    }
+    clang::PreprocessingRecord *PPRec = PP.getPreprocessingRecord();
+
+    return std::make_unique<Cilk2Vitis>(&CI.getASTContext(), PPRec,
+                                        CI.getSourceManager());
   }
 
-  llvmModule->print(outs(), NULL);
+  /*std::string extractFileName() {
+    const clang::SourceManager &SM = getCompilerInstance().getSourceManager();
+
+    const FileEntry *MainFileEntry = SM.getFileEntryForID(SM.getMainFileID());
+
+    std::filesystem::path filePath(MainFileEntry->getName().str());
+    std::string parentDir = filePath.parent_path().string();
+    std::string name = filePath.stem().string();
+
+    return (parentDir + "/" + name + "_cilk.cpp");
+  }*/
+
+  void EndSourceFileAction() override {
+    std::cout << "end" << std::endl;
+    /*
+    clang::ASTContext &Context = getCompilerInstance().getASTContext();
+    std::error_code EC;
+    std::string outFilename = extractFileName();
+    llvm::raw_fd_ostream outFile(outFilename, EC, llvm::sys::fs::OF_None);
+
+    TheRewriter.getEditBuffer(Context.getSourceManager().getMainFileID())
+        .write(outFile);
+    outFile.close();
+    */
+  }
+};
+
+int main(int argc, const char **argv) {
+  if (argc < 2) {
+    std::cerr << "Expected path to input OpenCilk (C++) file." << std::endl;
+    return 1;
+  }
+
+  // std::string inFilename = argv[1];
+  // std::filesystem::path filePath(inFilename);
+  // std::string parentDir = filePath.parent_path().string();
+  // std::string name = filePath.stem().string();
+  // std::string outFilename = parentDir + "/" + name + ".json";
+
+  std::vector<std::string> compilationFlags = {
+      "/opt/OpenCilk/bin/clang",
+      "-c",
+      "-w",
+      "-fopencilk",
+      "-O3",
+      "-fsyntax-only",
+      "-I/opt/OpenCilk/include",
+      "-I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include"};
+
+  compilationFlags.push_back(argv[1]);
+
+  std::shared_ptr<clang::PCHContainerOperations> PCHContainerOps =
+      std::make_shared<clang::PCHContainerOperations>();
+
+  clang::FileSystemOptions FSOpts;
+  llvm::IntrusiveRefCntPtr<clang::FileManager> Files(
+      new clang::FileManager(FSOpts));
+
+  clang::tooling::ToolInvocation invocation(
+      compilationFlags, std::make_unique<Cilk2VitisAction>(), Files.get(),
+      PCHContainerOps);
+
+  return !invocation.run();
 }

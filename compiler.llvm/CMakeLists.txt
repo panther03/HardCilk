@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Project name
-project(cilk2vitis)
+project(tapir2vitis)
 
 if(NOT OPENCILK_HOME)
     set(OPENCILK_HOME "/opt/OpenCilk")
@@ -15,22 +15,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -g -fsanitize=address")
 
-# Specify the custom LLVM and Clang installation path
-set(LLVM_DIR "${OPENCILK_HOME}/lib/cmake/llvm")
-set(CLANG_DIR "${OPENCILK_HOME}/lib/cmake/clang")
+# Specify the custom LLVM installation path
+set(LLVM_DIR "/opt/OpenCilk/lib/cmake/llvm")
 
-# Find LLVM and Clang
+# Find LLVM
 find_package(LLVM REQUIRED CONFIG)
-find_package(Clang REQUIRED CONFIG)
 
 # Add LLVM headers
 include_directories(${LLVM_INCLUDE_DIRS})
-include_directories(${CLANG_INCLUDE_DIRS})
 include_directories("${OPENCILK_HOME}/include")
 # Link directories
 link_directories("${OPENCILK_HOME}/lib")
 
-# Add LLVM and Clang libraries
+# Add LLVM libraries
 add_definitions(${LLVM_DEFINITIONS})
 
 # Export compile commands for Clang tooling
@@ -42,16 +39,16 @@ set(SOURCE_FILES
 )
 
 # Add executable
-add_executable(cilk2vitis ${SOURCE_FILES})
+add_executable(tapir2vitis ${SOURCE_FILES})
 
-set_target_properties(cilk2vitis PROPERTIES
+set_target_properties(tapir2vitis PROPERTIES
+    # CXX_COMPILER /opt/OpenCilk/bin/clang++
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-# Link against LLVM and Clang libraries
-target_link_libraries(cilk2vitis PRIVATE
-    clangTooling
-    clangFrontend
-    clangSerialization
-    clangDriver
+# Link against LLVM libraries
+target_link_libraries(tapir2vitis PRIVATE
+    LLVMCore
+    LLVMIRReader
+    LLVMTransformUtils
 )
