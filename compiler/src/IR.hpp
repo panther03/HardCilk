@@ -19,6 +19,25 @@ class IRStmt {
 public:
   const clang::Stmt *innerStmt;
   IRStmt(const clang::Stmt *innerStmt) : innerStmt(innerStmt) {}
+
+  void printAllIdentifiers() {
+    std::vector<const Expr*> WorkList;
+    if (const Expr *E = dyn_cast<Expr>(innerStmt)) {
+      WorkList.push_back(E);
+    }    
+
+    while (!WorkList.empty()) {
+      const Expr *E = WorkList.back();
+      WorkList.pop_back();
+      for (const auto &C : E->children()) {
+        if (const auto *ID = dyn_cast<DeclRefExpr>(C)) {
+          llvm::outs() << ID->getNameInfo().getAsString() << "\n";
+        } else if (const Expr *CE = dyn_cast<Expr>(C)) {
+          WorkList.push_back(CE);
+        }
+      }
+    }    
+  }
 };
 
 class IRBasicBlock {
@@ -29,11 +48,12 @@ private:
   unsigned Ind;
 
 public:
-  std::set<IRBasicBlock *> Preds;
   std::set<IRBasicBlock *> Succs;
   IRStmtPtr Terminator;
 
   IRBasicBlock(unsigned Ind, IRFunction* Parent) : Ind(Ind), Parent(Parent) {}
+  void iteratePreds(std::function<void(IRBasicBlock* B)> CB);
+
   void pushStmt(IRStmt *stmt) { Stmts.push_back(IRStmtPtr(stmt)); }
   // Clones contents of basic block. Does not clone predecessors and successors.
   void clone(IRBasicBlock *Dest) {
@@ -108,6 +128,8 @@ private:
   IRProgram *Parent;
 
 public:
+  IRBasicBlock *Entry;
+
   IRFunction(IRProgram *Parent) : Parent(Parent) {}
   IRBasicBlock *createBlock() {
     IRBlockPtr B = std::make_unique<IRBasicBlock>(Blocks.size(), this);
@@ -115,14 +137,15 @@ public:
     Blocks.push_back(std::move(B));
     return Bp;
   }
+
   void print(clang::ASTContext &Context) {
     int i = 0;
     for (auto &B: Blocks) {
       fprintf(stdout, BHGREEN "Block %d" COLOR_RESET "\n", i);
       llvm::outs() << "PREDS: ";
-      for (auto *Pred: B->Preds) {
+      B->iteratePreds([] (IRBasicBlock *Pred) -> void {
         llvm::outs() << Pred->getInd() << " ";
-      }
+      });
       llvm::outs() << "\n";
       B->print(Context, "\n");
       llvm::outs() << "SUCCS: ";
@@ -151,11 +174,11 @@ public:
         llvm::outs() << ";\n";
       }
 
-      for (auto &Pred: B.get()->Preds) {
+      B->iteratePreds([&] (IRBasicBlock *Pred) -> void {
         llvm::outs() << "    Node" << B.get()->getInd();
         llvm::outs() << " -> Node" << Pred->getInd();
         llvm::outs() << ";\n";
-      }
+      });
     }
     llvm::outs() << "}\n";
   }
@@ -167,8 +190,7 @@ public:
   bool empty() { return Blocks.empty(); }
   IRBlockPtr &front() { return Blocks.front(); }
   IRBlockPtr &back() { return Blocks.back(); }
-  // TODO: this will not stay this way, if we add more blocks
-  IRBasicBlock *entry() { return Blocks.back().get(); }
+  IRBasicBlock *entry() { return Entry;  }
   // This will I think?
   IRBasicBlock *exit() { return Blocks.front().get(); }
 

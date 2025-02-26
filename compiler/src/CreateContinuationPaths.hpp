@@ -1,10 +1,13 @@
 #pragma once
 
+#include <llvm/ADT/SetVector.h>
 #include <set>
 #include <string>
 #include <unordered_map>
 
 #include "IR.hpp"
+
+using namespace llvm;
 
 struct ContFunctionInfo {
   std::set<std::string> args;
@@ -16,13 +19,13 @@ struct CreateContinuationPaths {
   // The first path corresponds to the original function.
   // Note that the sets need to be ordered to preserve DFS order,
   // allowing us to compute the values actually needed by the path
-  std::vector<std::set<IRBasicBlock *>> Paths;
+  std::vector<SetVector<IRBasicBlock *>> Paths;
   std::unordered_map<IRBasicBlock *, int> PathLookup;
   std::vector<ContFunctionInfo> Infos;
 
 private:
   IRBasicBlock *duplicateBasicBlock(IRBasicBlock *B,
-                                    std::set<IRBasicBlock *> &CurrPath) {
+    SetVector<IRBasicBlock *> &CurrPath) {
     IRBasicBlock *CloneBB = B->getParent()->createBlock();
     B->clone(CloneBB);
 
@@ -30,19 +33,13 @@ private:
     for (IRBasicBlock *Succ : B->Succs) {
       CloneBB->Succs.insert(Succ);
     }
-    // Copy over predecessors that belong to the current path
-    std::vector<IRBasicBlock *> RemoveList;
-    for (IRBasicBlock *Pred : B->Preds) {
-      if (CurrPath.find(Pred) != CurrPath.end()) {
+
+    B->iteratePreds([&] (IRBasicBlock *Pred) -> void {
+      if (CurrPath.contains(Pred)) {
         Pred->Succs.erase(B);
         Pred->Succs.insert(CloneBB);
-        RemoveList.push_back(Pred);
-        CloneBB->Preds.insert(Pred);
       }
-    }
-    for (IRBasicBlock *ToRemove : RemoveList) {
-      B->Preds.erase(ToRemove);
-    }
+    });
     return CloneBB;
   }
 
@@ -69,8 +66,8 @@ private:
       Paths[CurrLevel].insert(B);
       PathLookup.insert(std::make_pair(B, CurrLevel));
 
-      if (B->Terminator.get() &&
-          isa<CilkSyncStmt>(B->Terminator.get()->innerStmt)) {
+      if (B->Terminator &&
+          isa<CilkSyncStmt>(B->Terminator->innerStmt)) {
         // sync instruction should have only one successor
         IRBasicBlock *SISucc = *(B->Succs.begin());
         if (PathLookup.find(SISucc) != PathLookup.end()) {

@@ -37,7 +37,6 @@ private:
               IrB->Terminator = std::make_unique<IRStmt>(S);
               auto *NewIrB = IrF->createBlock();
               IrB->Succs.insert(NewIrB);
-              NewIrB->Preds.insert(IrB);
               IrB = NewIrB;
             } else {
               Ast2IrDestination[S] = IrB;
@@ -53,19 +52,20 @@ private:
       }
       Cfg2IRLookup[CfgB] = std::make_pair(IrBStart, IrB);
     }
+    IrF->Entry = Cfg2IRLookup[&(Cfg->getEntry())].first;
     for (auto *CfgB: *Cfg) {
       if (Cfg2IRLookup.find(CfgB) == Cfg2IRLookup.end()) {
         PANIC("not traversed all cfg blocks?");
       }
       auto [block_start, block_end] = Cfg2IRLookup[CfgB];
-      for (auto PredI = CfgB->pred_begin(); PredI != CfgB->pred_end();  ++PredI) {
+      /*for (auto PredI = CfgB->pred_begin(); PredI != CfgB->pred_end();  ++PredI) {
         if (auto *Pred = PredI->getReachableBlock()) {
           if (Cfg2IRLookup.find(Pred) == Cfg2IRLookup.end()) {
             PANIC("predecessor not found in lookup");
           }
           block_start->Preds.insert(Cfg2IRLookup[Pred].second);
         }
-      }
+      }*/
       for (auto SuccI = CfgB->succ_begin(); SuccI != CfgB->succ_end();  ++SuccI) {
         if (auto *Succ = SuccI->getReachableBlock()) {
           if (Cfg2IRLookup.find(Succ) == Cfg2IRLookup.end()) {

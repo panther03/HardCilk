@@ -18,6 +18,17 @@ using namespace clang::driver;
 // static cl::OptionCategory MyToolCategory("cilk2vitis options");
 // static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
 
+// so much for header only...
+void IRBasicBlock::iteratePreds(std::function<void(IRBasicBlock* B)> CB) {
+  for (auto &B : *Parent) {
+    auto &BSuccs = (B.get())->Succs;
+    if (BSuccs.find(this) != BSuccs.end()) {
+      CB(B.get());
+    }
+  }
+}
+
+
 class Cilk2Vitis : public clang::ASTConsumer {
 private:
   clang::ASTContext *Context;
@@ -49,8 +60,15 @@ public:
     P.print(Context);
 
     for (auto &F: P) {
+      F.get()->dumpGraph(Context);
       CreateContinuationPaths(*F.get());
       F.get()->dumpGraph(Context);
+      
+      for (auto &B: *F.get()) {
+        for (auto &S: *B.get()) {
+          S->printAllIdentifiers();
+        }
+      }
     }
   }
 };

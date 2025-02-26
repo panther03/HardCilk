@@ -50,6 +50,7 @@ set_target_properties(cilk2vitis PROPERTIES
 
 # Link against LLVM and Clang libraries
 target_link_libraries(cilk2vitis PRIVATE
+    LLVMCore
     clangTooling
     clangFrontend
     clangSerialization
