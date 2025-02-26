@@ -8,6 +8,7 @@
 
 #include "Cilk2IR.hpp"
 #include "IR.hpp"
+#include "CreateContinuationPaths.hpp"
 
 using namespace clang;
 using namespace clang::tooling;
@@ -44,10 +45,12 @@ public:
         continue;
       Visitor.TraverseDecl(Decl);
     }
-    for (auto &F: P.getFuncs()) {
-      for (auto &S: F.get()->getStmts()) {
-        std::cout << "test3" << std::endl;
-      }
+
+    P.print(Context);
+
+    for (auto &F: P) {
+      CreateContinuationPaths(*F.get());
+      F.get()->dumpGraph(Context);
     }
   }
 };
