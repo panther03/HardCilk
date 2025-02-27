@@ -2,8 +2,8 @@
 
 #include <clang/AST/ASTConsumer.h>
 #include <clang/AST/RecursiveASTVisitor.h>
-#include <clang/Basic/SourceManager.h>
 #include <clang/Analysis/CFG.h>
+#include <clang/Basic/SourceManager.h>
 
 #include <iostream>
 
@@ -14,59 +14,73 @@ class Cilk2IRVisitor : public clang::RecursiveASTVisitor<Cilk2IRVisitor> {
 private:
   clang::ASTContext *Context;
   struct {
-    IRFunction* func;
+    IRFunction *func;
   } TraverseContext;
   IRProgram &P;
-  std::unordered_map<const Stmt*, IRBasicBlock*> Ast2IrDestination;
-  const Stmt* lastStmt;
+  std::unordered_map<const Stmt *, IRBasicBlock *> Ast2IrDestination;
+  const Stmt *lastStmt;
 
-  void functionCFG2IR (CFG* Cfg) {
-    std::unordered_map<CFGBlock*, std::pair<IRBasicBlock*, IRBasicBlock*>> Cfg2IRLookup;
+  void functionCFG2IR(CFG *Cfg) {
+    std::unordered_map<CFGBlock *, std::pair<IRBasicBlock *, IRBasicBlock *>>
+        Cfg2IRLookup;
     auto *IrF = P.createFunc();
-    for (auto *CfgB: *Cfg) {
+    for (auto *CfgB : *Cfg) {
       auto *IrB = IrF->createBlock();
       auto *IrBStart = IrB;
 
-      for (auto &CfgE: *CfgB) {
+      int CfgEInd = 0;
+      for (auto &CfgE : *CfgB) {
         switch (CfgE.getKind()) {
-          case CFGElement::Kind::Statement: {
-            CFGStmt CfgS = CfgE.castAs<CFGStmt>();
-            const Stmt *S = CfgS.getStmt();
+        case CFGElement::Kind::Statement: {
+          CFGStmt CfgS = CfgE.castAs<CFGStmt>();
+          const Stmt *S = CfgS.getStmt();
 
-            if (isa<CilkSyncStmt>(S)) {
-              IrB->Terminator = std::make_unique<IRStmt>(S);
-              auto *NewIrB = IrF->createBlock();
-              IrB->Succs.insert(NewIrB);
-              IrB = NewIrB;
+          if (isa<CilkSyncStmt>(S) || isa<ReturnStmt>(S)) {
+            IrB->Terminator = std::make_unique<IRStmt>(S);
+            // bruh aint no way
+            IRBasicBlock *NewIrB = nullptr;
+            auto &CfgBR = *CfgB;
+            if ((CfgEInd == (CfgB->size()-1)) &&
+                !CfgB->getTerminator().isValid()) {
+              NewIrB = IrB;
             } else {
-              Ast2IrDestination[S] = IrB;
+              NewIrB = IrF->createBlock();
+              IrB->Succs.insert(NewIrB);
             }
-            
-            break;
+            IrB = NewIrB;
+          } else {
+            Ast2IrDestination[S] = IrB;
           }
-          default: PANIC("Unsupported CFGElement: %d", CfgE.getKind());
+
+          break;
         }
+        default:
+          PANIC("Unsupported CFGElement: %d", CfgE.getKind());
+        }
+        CfgEInd++;
       }
       if (CfgB->getTerminator().isValid()) {
-        IrB->Terminator = std::make_unique<IRStmt>(CfgB->getTerminator().getStmt());
+        IrB->Terminator =
+            std::make_unique<IRStmt>(CfgB->getTerminator().getStmt());
       }
       Cfg2IRLookup[CfgB] = std::make_pair(IrBStart, IrB);
     }
     IrF->Entry = Cfg2IRLookup[&(Cfg->getEntry())].first;
-    for (auto *CfgB: *Cfg) {
+    for (auto *CfgB : *Cfg) {
       if (Cfg2IRLookup.find(CfgB) == Cfg2IRLookup.end()) {
         PANIC("not traversed all cfg blocks?");
       }
       auto [block_start, block_end] = Cfg2IRLookup[CfgB];
-      /*for (auto PredI = CfgB->pred_begin(); PredI != CfgB->pred_end();  ++PredI) {
-        if (auto *Pred = PredI->getReachableBlock()) {
-          if (Cfg2IRLookup.find(Pred) == Cfg2IRLookup.end()) {
-            PANIC("predecessor not found in lookup");
+      /*for (auto PredI = CfgB->pred_begin(); PredI != CfgB->pred_end();
+      ++PredI) { if (auto *Pred = PredI->getReachableBlock()) { if
+      (Cfg2IRLookup.find(Pred) == Cfg2IRLookup.end()) { PANIC("predecessor not
+      found in lookup");
           }
           block_start->Preds.insert(Cfg2IRLookup[Pred].second);
         }
       }*/
-      for (auto SuccI = CfgB->succ_begin(); SuccI != CfgB->succ_end();  ++SuccI) {
+      for (auto SuccI = CfgB->succ_begin(); SuccI != CfgB->succ_end();
+           ++SuccI) {
         if (auto *Succ = SuccI->getReachableBlock()) {
           if (Cfg2IRLookup.find(Succ) == Cfg2IRLookup.end()) {
             PANIC("successor not found in lookup");
@@ -77,31 +91,75 @@ private:
     }
   }
 
+  IRStmt *makeIRStmt(const Stmt *S) {
+
+    if (auto *DS = dyn_cast<DeclStmt>(S)) {
+      if (DS->child_begin() != DS->child_end()) {
+        if (!DS->isSingleDecl()) {
+          PANIC("unsupported: assignment to multiple declarations");
+        }
+        IRStmt *IrS = new IRStmt(*(DS->child_begin()));
+        if (auto *D = dyn_cast<NamedDecl>(DS->getSingleDecl())) {
+          IrS->Lhs = D;
+        } else {
+          PANIC("unsupported: assignment to non-named declaration");
+        }
+        return IrS;
+      } else {
+        // We don't need to include a declaration with no children in the IR.
+        return nullptr;
+      }
+    } else if (auto *BS = dyn_cast<BinaryOperator>(S)) {
+      // note: don't care about +=, -=, etc.
+      // these depend on the previous value so not an LHS
+      if (BS->isAssignmentOp()) {
+        const NamedDecl *D = nullptr;
+        if (auto *ICE = dyn_cast<ImplicitCastExpr>(BS->getLHS())) {
+          if (auto *DRE = dyn_cast<DeclRefExpr>(ICE)) {
+            D = DRE->getDecl();
+          }
+        } else if (auto *DRE = dyn_cast<DeclRefExpr>(BS->getLHS())) {
+          D = DRE->getDecl();
+        }
+
+        IRStmt *IrS;
+        if (D) {
+          IrS = new IRStmt(BS->getRHS());
+          IrS->Lhs = D;
+        } else {
+          IrS = new IRStmt(BS);
+        }
+        return IrS;
+      }
+    }
+    return new IRStmt(S);
+  }
+
 public:
-  explicit Cilk2IRVisitor(clang::ASTContext *Context, IRProgram &P) : Context(Context), P(P) {}
+  explicit Cilk2IRVisitor(clang::ASTContext *Context, IRProgram &P)
+      : Context(Context), P(P) {}
 
   bool VisitFunctionDecl(clang::FunctionDecl *Decl) {
-    std::cout << "test1" << std::endl;
-
     CFG::BuildOptions Options;
-    auto Cfg = CFG::buildCFG(nullptr, (Decl->getBody()) , Context, Options);
+    auto Cfg = CFG::buildCFG(nullptr, (Decl->getBody()), Context, Options);
     if (Cfg == nullptr) {
-      PANIC("Could not build CFG for function %s", Decl->getName().str().c_str());
+      PANIC("Could not build CFG for function %s",
+            Decl->getName().str().c_str());
       return false;
     }
     functionCFG2IR(Cfg.get());
-    Cfg->print(llvm::outs(), Context->getLangOpts(), true);
-    Cfg->viewCFG(Context->getLangOpts());
+    //Cfg->print(llvm::outs(), Context->getLangOpts(), true);
+    //Cfg->viewCFG(Context->getLangOpts());
     return true;
   }
 
-  //bool VisitReturnStmt(const ReturnStmt *stmt) {
-  //  std::unique_ptr<IRStmt> s = std::make_unique<IRStmt>(stmt);
-  //  if (TraverseContext.func) { 
-  //  std::cout << "test2" << std::endl;
-  //    TraverseContext.func->newStmt(std::move(s));
-  //  }
-//
+  // bool VisitReturnStmt(const ReturnStmt *stmt) {
+  //   std::unique_ptr<IRStmt> s = std::make_unique<IRStmt>(stmt);
+  //   if (TraverseContext.func) {
+  //   std::cout << "test2" << std::endl;
+  //     TraverseContext.func->newStmt(std::move(s));
+  //   }
+  //
   //  return true;
   //}
 
@@ -111,12 +169,13 @@ public:
     }
     for (const auto *child : Stmt->children()) {
       if (Ast2IrDestination.find(child) != Ast2IrDestination.end()) {
-        Ast2IrDestination[child]->pushStmt(new IRStmt(child));
+        IRStmt *IrS = makeIRStmt(child);
+        if (IrS) {
+          Ast2IrDestination[child]->pushStmt(IrS);
+        }
       }
     }
-    
+
     return true;
   }
-
-
 };

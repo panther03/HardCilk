@@ -18,25 +18,15 @@ class IRProgram;
 class IRStmt {
 public:
   const clang::Stmt *innerStmt;
-  IRStmt(const clang::Stmt *innerStmt) : innerStmt(innerStmt) {}
+  // A declaration that we are sure this instruction only writes to,
+  // and does not need the value of at all.
+  const clang::NamedDecl *Lhs = nullptr;
+  IRStmt(const clang::Stmt *innerStmt, const clang::NamedDecl *Lhs = nullptr) : innerStmt(innerStmt), Lhs(Lhs) {}
 
   void printAllIdentifiers() {
-    std::vector<const Expr*> WorkList;
-    if (const Expr *E = dyn_cast<Expr>(innerStmt)) {
-      WorkList.push_back(E);
-    }    
-
-    while (!WorkList.empty()) {
-      const Expr *E = WorkList.back();
-      WorkList.pop_back();
-      for (const auto &C : E->children()) {
-        if (const auto *ID = dyn_cast<DeclRefExpr>(C)) {
-          llvm::outs() << ID->getNameInfo().getAsString() << "\n";
-        } else if (const Expr *CE = dyn_cast<Expr>(C)) {
-          WorkList.push_back(CE);
-        }
-      }
-    }    
+    for (auto it = ExprIdentifierIterator(innerStmt); !it.done(); ++it) {
+      llvm::outs() << (*it)->getNameInfo().getAsString() << "\n";
+    }
   }
 };
 
@@ -58,14 +48,14 @@ public:
   // Clones contents of basic block. Does not clone predecessors and successors.
   void clone(IRBasicBlock *Dest) {
     for (auto &Stmt : Stmts) {
-      Dest->pushStmt(new IRStmt(Stmt.get()->innerStmt));
+      Dest->pushStmt(new IRStmt(Stmt.get()->innerStmt, Stmt.get()->Lhs));
     }
     if (Terminator != nullptr) {
       Dest->Terminator = std::make_unique<IRStmt>(Terminator.get()->innerStmt);
     }
   }
 
-  void graphPrintStmt(clang::ASTContext &Context, const Stmt* S, const char *NewlineSymbol) {
+  void graphPrintStmt(llvm::raw_ostream &out, clang::ASTContext &Context, const Stmt* S, const char *NewlineSymbol) {
     llvm::SmallString<256> MsgBuffer;
     llvm::raw_svector_ostream Msg(MsgBuffer);
 
@@ -75,34 +65,51 @@ public:
     // yyea
     auto s = std::regex_replace(MsgBuffer.str().str(), std::regex("<"), "\\<");
     //s = std::regex_replace(s, std::regex(">"), "\\>");
-    llvm::outs() << s;
+    out << s;
   }
 
-  void print(clang::ASTContext &Context, const char* NewlineSymbol)  {
+  void print(llvm::raw_ostream &out, clang::ASTContext &Context, const char* NewlineSymbol)  {
     int I = 1;
+    int j = 0;
     for (auto &Stmt : Stmts) {
-      llvm::outs() << "   " << I << ": ";
-      graphPrintStmt(Context, Stmt->innerStmt, NewlineSymbol);
+      out << "   " << I << ": ";
+      if (Stmt->Lhs) {
+        out << Stmt->Lhs->getName() << " = ";
+        j++;
+      }
+      graphPrintStmt(out, Context, Stmt->innerStmt, NewlineSymbol);
       if (isa<Expr>(Stmt->innerStmt)) 
-        llvm::outs() << ";" << NewlineSymbol;
+        out << ";" << NewlineSymbol;
       I++;
     }
     if (Terminator != nullptr) {
       const Stmt *S = Terminator->innerStmt;
       if (auto *IS = dyn_cast<IfStmt>(S)) {
-        llvm::outs() << "   T: if (";
-        graphPrintStmt(Context, IS->getCond(), NewlineSymbol);
-        llvm::outs() << ")" << NewlineSymbol;
+        out << "   T: if (";
+        graphPrintStmt(out, Context, IS->getCond(), NewlineSymbol);
+        out << ")" << NewlineSymbol;
+      } else if (auto *FS = dyn_cast<ForStmt>(S)) {
+        out << "   T : for (";
+        graphPrintStmt(out, Context, FS->getInit(), "");
+        out << "; ";
+        graphPrintStmt(out, Context, FS->getCond(), "");
+        out << "; ";
+        graphPrintStmt(out, Context, FS->getInc(), "");
+        out << ")" << NewlineSymbol;
+      } else if (auto *RS = dyn_cast<ReturnStmt>(S)) {
+        out << "   T: return ";
+        graphPrintStmt(out, Context, RS->getRetValue(), NewlineSymbol);
+        out << NewlineSymbol;
       } else if (isa<CilkSyncStmt>(S)){
-        llvm::outs() << "   T: sync" << NewlineSymbol;
+        out << "   T: sync" << NewlineSymbol;
       }
     }
   }
-  void dumpGraph(clang::ASTContext &Context) {
-    llvm::outs() << "\"{ [B" << getInd();
-    llvm::outs() << "]\\l";
-    print(Context, "\\l");
-    llvm::outs() << "}\"";
+  void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
+    out << "\"{ [B" << getInd();
+    out << "]\\l";
+    print(out, Context, "\\l");
+    out << "}\"";
   }
 
   using IRBlockListTy = std::vector<IRStmtPtr>;
@@ -138,49 +145,43 @@ public:
     return Bp;
   }
 
-  void print(clang::ASTContext &Context) {
+  void print(llvm::raw_ostream &out, clang::ASTContext &Context) {
     int i = 0;
     for (auto &B: Blocks) {
       fprintf(stdout, BHGREEN "Block %d" COLOR_RESET "\n", i);
-      llvm::outs() << "PREDS: ";
-      B->iteratePreds([] (IRBasicBlock *Pred) -> void {
-        llvm::outs() << Pred->getInd() << " ";
+      out << "PREDS: ";
+      B->iteratePreds([&] (IRBasicBlock *Pred) -> void {
+        out << Pred->getInd() << " ";
       });
-      llvm::outs() << "\n";
-      B->print(Context, "\n");
-      llvm::outs() << "SUCCS: ";
+      out << "\n";
+      B->print(out, Context, "\n");
+      out << "SUCCS: ";
       for (auto *Succ: B->Succs) {
-        llvm::outs() << Succ->getInd() << " ";
+        out << Succ->getInd() << " ";
       }
-      llvm::outs() << "\n\n\n";
+      out << "\n\n\n";
       i++;
     }
   }
 
-  void dumpGraph(clang::ASTContext &Context) {
-    llvm::outs() << "digraph unnamed {\n";
+  void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
+    out << "digraph unnamed {\n";
     for (auto &B: Blocks) {
       auto *BB = B.get();
-      llvm::outs() << "    Node" << BB->getInd();
-      llvm::outs() << " [shape=record,label=";
-      BB->dumpGraph(Context);
-      llvm::outs() << " ];\n";
+      out << "    Node" << BB->getInd();
+      out << " [shape=record,label=";
+      BB->dumpGraph(out, Context);
+      out << " ];\n";
     }
     
     for (auto &B: Blocks) {
       for (auto &Succ: B.get()->Succs) {
-        llvm::outs() << "    Node" << B.get()->getInd();
-        llvm::outs() << " -> Node" << Succ->getInd();
-        llvm::outs() << ";\n";
+        out << "    Node" << B.get()->getInd();
+        out << " -> Node" << Succ->getInd();
+        out << ";\n";
       }
-
-      B->iteratePreds([&] (IRBasicBlock *Pred) -> void {
-        llvm::outs() << "    Node" << B.get()->getInd();
-        llvm::outs() << " -> Node" << Pred->getInd();
-        llvm::outs() << ";\n";
-      });
     }
-    llvm::outs() << "}\n";
+    out << "}\n";
   }
 
   using IRBlockListTy = std::vector<IRBlockPtr>;
@@ -216,9 +217,9 @@ public:
     return Fp;
   }
 
-  void print(clang::ASTContext &Context) {
+  void print(llvm::raw_ostream &out, clang::ASTContext &Context) {
     for (auto &F: Funcs) {
-      F.get()->print(Context);
+      F.get()->print(out, Context);
     }
   }
 

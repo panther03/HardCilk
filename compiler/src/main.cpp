@@ -57,19 +57,24 @@ public:
       Visitor.TraverseDecl(Decl);
     }
 
-    P.print(Context);
+    P.print(llvm::outs(), Context);
 
-    for (auto &F: P) {
-      F.get()->dumpGraph(Context);
-      CreateContinuationPaths(*F.get());
-      F.get()->dumpGraph(Context);
-      
-      for (auto &B: *F.get()) {
-        for (auto &S: *B.get()) {
-          S->printAllIdentifiers();
-        }
-      }
+    std::error_code EC;
+    llvm::raw_fd_ostream DotFile("irbefore.dot", EC, llvm::sys::fs::OF_Text);
+    if (EC) {
+      PANIC("could not open file irbefore.dot");
     }
+    P.front()->dumpGraph(DotFile, Context);
+    for (auto &F: P) {
+      // F.get()->dumpGraph(Context);
+      CreateContinuationPaths(*F.get());
+    }
+    llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
+    if (EC) {
+      PANIC("could not open file ir.dot");
+    }
+    P.front()->dumpGraph(DotFile2, Context);
+    
   }
 };
 
@@ -102,7 +107,6 @@ public:
   }*/
 
   void EndSourceFileAction() override {
-    std::cout << "end" << std::endl;
     /*
     clang::ASTContext &Context = getCompilerInstance().getASTContext();
     std::error_code EC;

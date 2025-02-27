@@ -10,8 +10,8 @@
 using namespace llvm;
 
 struct ContFunctionInfo {
-  std::set<std::string> args;
-  std::set<std::string> locals;
+  std::set<const NamedDecl*> args;
+  std::set<const NamedDecl*> locals;
 };
 
 struct CreateContinuationPaths {
@@ -97,11 +97,10 @@ private:
   // TODO: this function is not going to handle more complex cases like
   // a store being present in only one branch and a load at the join
   // (so the value is free for the whole function)
-  /*void analyzePath(ContFunctionInfo &c, SetVector<BasicBlock *> &path,
-                   std::set<Value *> *inFrees) {
-    std::set<Value *> &free = c.args;
-    std::set<Value *> &refd = c.locals;
-    std::set<Value *> seen;
+  void analyzePath(ContFunctionInfo &c, SetVector<IRBasicBlock *> &path,
+                   std::set<const NamedDecl *> *inFrees) {
+    std::set<const NamedDecl *> &free = c.args;
+    std::set<const NamedDecl *> &refd = c.locals;
 
     // Values that will be used in the proceeding blocks regardless of whether
     // they are used here. Only removed if created here.
@@ -112,6 +111,23 @@ private:
     }
     for (auto &bb : path) {
       for (auto &I : *bb) {
+
+        for (auto it = ExprIdentifierIterator(I->innerStmt); !it.done(); ++it) { 
+          const NamedDecl* D = (*it)->getDecl();
+          if (D && (refd.find(D) == refd.end())) {
+            free.insert(D);
+            refd.insert(D);
+          }
+        }
+
+        if (I->Lhs && refd.find(I->Lhs) == refd.end()) {
+          refd.insert(I->Lhs);
+          free.erase(I->Lhs);
+        }
+        
+
+        
+        /*
         unsigned opstart = 0;
         unsigned opend = I.getNumOperands();
         if (auto *loadInst = dyn_cast<LoadInst>(&I)) {
@@ -128,8 +144,10 @@ private:
           }
           opstart = 0;
           opend = storeInst->getPointerOperandIndex();
-        }
-        for (unsigned i = opstart; i < opend; ++i) {
+        }*/
+
+
+        /*for (unsigned i = opstart; i < opend; ++i) {
           Value *operand = I.getOperand(i);
           if ((isa<Argument>(operand) || isa<Instruction>(operand)) &&
               (seen.find(operand) == seen.end())) {
@@ -137,7 +155,7 @@ private:
           }
         }
         free.erase(&I);
-        seen.insert(&I);
+        seen.insert(&I);*/
       }
     }
     for (auto *v : free) {
@@ -154,7 +172,7 @@ private:
       outs() << v->getName() << ", ";
     }
     outs() << "\n";
-  }*/
+  }
 
 public:
   CreateContinuationPaths(IRFunction &F) {
@@ -164,50 +182,52 @@ public:
       // Not a function with syncs
       return;
     }
-    /*
-    std::deque<BasicBlock *> todo;
-    for (auto &bb : func) {
+    return;
+    
+    std::deque<IRBasicBlock *> todo;
+    for (auto &B : F) {
       // don't care about the original function
-      if (pathLookup[&bb] == 0)
+      if (PathLookup[B.get()] == 0)
         continue;
 
-      if (auto *returnInst = dyn_cast<ReturnInst>(bb.getTerminator())) {
-        todo.push_back(&bb);
+      if (B->Succs.empty()) {
+        todo.push_back(B.get());
       }
     }
 
-    infos.resize(paths.size() - 1);
+    Infos.resize(Paths.size() - 1);
     // just used for checking assumptions
-    std::vector<bool> visited(paths.size() - 1, 0);
+    std::vector<bool> visited(Paths.size() - 1, 0);
 
     while (!todo.empty()) {
       auto *bb = todo.front();
       todo.pop_front();
 
-      assert(pathLookup.find(bb) != pathLookup.end());
-      if (pathLookup[bb] == 0)
+      assert(PathLookup.find(bb) != PathLookup.end());
+      if (PathLookup[bb] == 0)
         continue;
-      int path = pathLookup[bb] - 1;
+      int path = PathLookup[bb] - 1;
+      std::cout << path << std::endl;
       // we should only visit a path once, because sync continue blocks should
       // only have one parent
       // TODO: does this assumption make sense?
       assert(!visited[path]);
 
-      std::set<Value *> *inFrees = NULL;
-      if (auto *succBb = bb->getSingleSuccessor()) {
-        outs() << bb->getName() << "\n";
-        assert(pathLookup.find(succBb) != pathLookup.end());
-        inFrees = &(infos[pathLookup[succBb] - 1].args);
+      std::set<const NamedDecl *> *inFrees = NULL;
+      if (auto *succBb = *(bb->Succs.begin())) {
+        outs() << bb->getInd() << "\n";
+        assert(PathLookup.find(succBb) != PathLookup.end());
+        inFrees = &(Infos[PathLookup[succBb] - 1].args);
       }
 
-      analyzePath(infos[path], paths[path + 1], inFrees);
+      analyzePath(Infos[path], Paths[path + 1], inFrees);
       visited[path] = true;
 
-      auto *startBb = paths[path + 1][0];
-      for (auto *predBb : predecessors(startBb)) {
-        todo.push_front(predBb);
-      }
+      auto *startBb = Paths[path + 1][0];
+
+      startBb->iteratePreds([&] (IRBasicBlock *Pred) -> void {
+        todo.push_front(Pred);
+      });
     }
-    */
   }
 };
