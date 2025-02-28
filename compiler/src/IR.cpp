@@ -164,8 +164,32 @@ void IRFunction::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
       out << " -> Node" << Ind << "_" << Succ->getInd();
       out << ";\n";
     }
+    const IRBasicBlock* HasSpawnToSpawnNext = nullptr;
+    for (auto &S: *B) {
+      if ((Spawn2SpawnNext.find(S.get()) != Spawn2SpawnNext.end())) {
+        HasSpawnToSpawnNext = Spawn2SpawnNext[S.get()];
+        break;
+      }
+    }
+    if (HasSpawnToSpawnNext) {
+      out << "    \"Node" << Ind << "_" << B->getInd();
+      out << "\" -> \"Node" << Ind << "_" << HasSpawnToSpawnNext->getInd() << "\"";
+      out << "  [style=\"dashed\" color=\"green\"];\n";
+    }
   }
   out << "}\n";
+}
+
+void IRFunction::dumpArgs(llvm::raw_ostream &out) {
+  out << "\tArgs: ";
+  for (auto *v : Args) {
+    out << v->getName() << ", ";
+  }
+  out << "\n\tLocals: ";
+  for (auto *v : Locals) {
+    out << v->getName() << ", ";
+  }
+  out << "\n";
 }
 
 void IRFunction::moveBlock(IRBasicBlock *B, IRFunction *Dest) {
@@ -209,13 +233,11 @@ void IRProgram::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
     F->dumpGraph(out, Context);
   }
   for (auto &F: Funcs) {
-    for (auto &B: *F.get()) {
-      if (B->Terminator && B->Terminator->SpawnNextDest) {
-        out << "    \"Node" << F->Ind << "_" << B.get()->getInd();
-        out << "\" -> \"Node" << B->Terminator->SpawnNextDest->Ind << "_" << 0 << "\"";
-        out << "  [style=\"dashed\" color=\"red\" lhead=clusterfn";
-        out << B->Terminator->SpawnNextDest->Ind << "];\n";
-      }
+    for (const auto & [B, SnD] : F->SpawnNext2Cont) { 
+      out << "    \"Node" << F->Ind << "_" << B->getInd();
+      out << "\" -> \"Node" << SnD->Ind << "_" << 0 << "\"";
+      out << "  [style=\"dashed\" color=\"red\" lhead=clusterfn";
+      out << SnD->Ind << "];\n";
     }
   }
   out << "}\n";

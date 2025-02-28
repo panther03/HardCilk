@@ -12,6 +12,7 @@ class Cilk2IRVisitor : public clang::RecursiveASTVisitor<Cilk2IRVisitor> {
 private:
   clang::ASTContext *Context;
   IRProgram &P;
+  NullStmt &Sentinel;
 
   void functionCFG2IR(const FunctionDecl* Decl, CFG *Cfg) {
     std::unordered_map<CFGBlock *, std::pair<IRBasicBlock *, IRBasicBlock *>>
@@ -100,8 +101,13 @@ private:
         }
         return IrS;
       } else {
-        // We don't need to include a declaration with no children in the IR.
-        return nullptr;
+        IRStmt *IrS = new IRStmt(&Sentinel);
+        if (auto *D = dyn_cast<NamedDecl>(DS->getSingleDecl())) {
+          IrS->Lhs = D;
+        } else {
+          PANIC("unsupported: assignment to non-named declaration");
+        }
+        return IrS;
       }
     } else if (auto *BS = dyn_cast<BinaryOperator>(S)) {
       // note: don't care about +=, -=, etc.
@@ -130,8 +136,8 @@ private:
   }
 
 public:
-  explicit Cilk2IRVisitor(clang::ASTContext *Context, IRProgram &P)
-      : Context(Context), P(P) {}
+  explicit Cilk2IRVisitor(clang::ASTContext *Context, IRProgram &P, NullStmt &Sentinel)
+      : Context(Context), P(P), Sentinel(Sentinel) {}
 
   bool VisitFunctionDecl(clang::FunctionDecl *Decl) {
     CFG::BuildOptions Options;

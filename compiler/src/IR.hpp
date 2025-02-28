@@ -76,8 +76,8 @@ public:
   const_iterator begin() const { return Stmts.begin(); }
   const_iterator end() const { return Stmts.end(); }
 
-  IRFunction *getParent() { return Parent; }
-  unsigned getInd() { return Ind; }
+  IRFunction *getParent() const { return Parent; }
+  unsigned getInd() const { return Ind; }
 };
 
 class IRFunction {
@@ -94,6 +94,8 @@ public:
   std::set<IRVarRef> Locals;
   friend class IRBasicBlock;
   friend class IRProgram;
+  std::unordered_map<const IRStmt*, const IRBasicBlock*> Spawn2SpawnNext;
+  std::unordered_map<const IRBasicBlock*, const IRFunction*> SpawnNext2Cont;
 
   IRFunction(unsigned Ind, IRProgram *Parent) : Parent(Parent), Ind(Ind) {}
   IRBasicBlock *createBlock();
@@ -101,6 +103,8 @@ public:
   void print(llvm::raw_ostream &out, clang::ASTContext &Context);
 
   void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context);
+
+  void dumpArgs(llvm::raw_ostream &out);
 
   void moveBlock(IRBasicBlock *B, IRFunction *Dest);
 
@@ -120,7 +124,8 @@ public:
   const_iterator begin() const { return Blocks.begin(); }
   const_iterator end() const { return Blocks.end(); }
 
-  IRProgram *getParent() { return Parent; }
+  IRProgram *getParent() const { return Parent; }
+  unsigned getInd() const { return Ind; }
 };
 
 class IRProgram {

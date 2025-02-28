@@ -9,6 +9,9 @@
 #include "Cilk2IR.hpp"
 #include "IR.hpp"
 #include "CreateContinuationFuns.hpp"
+#include "SetupArgsLocals.hpp"
+#include "clang/AST/Stmt.h"
+#include "clang/Basic/SourceLocation.h"
 
 using namespace clang;
 using namespace clang::tooling;
@@ -27,11 +30,13 @@ private:
 
   IRProgram P;
   Cilk2IRVisitor Visitor;
+  
+  NullStmt Sentinel;
 
 public:
   explicit Cilk2Vitis(clang::ASTContext *Context, PreprocessingRecord *PPRec,
                       SourceManager &SM)
-      : Context(Context), PPRec(PPRec), SM(SM), Visitor(Context, P) {}
+      : Context(Context), PPRec(PPRec), SM(SM), Sentinel(SourceLocation()), Visitor(Context, P, Sentinel) {}
 
   void HandleTranslationUnit(clang::ASTContext &Context) {
     // Only visit declarations declared in the input TU
@@ -62,6 +67,7 @@ public:
 
     for (auto &F: WorkList) {
       CreateContinuationFuns CCF(*F);
+      SetupArgsLocals SAL(*F, CCF.ContFuns);
     }
     llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
     if (EC) {

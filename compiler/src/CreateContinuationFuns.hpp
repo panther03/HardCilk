@@ -128,15 +128,35 @@ private:
         refd.erase(v);
       }
     }
-    outs() << "args: ";
-    for (auto *v : free) {
-      outs() << v->getName() << ", ";
+  }
+
+  void analyzeRoot(IRFunction &RootF) {
+    auto *ASTRootF = RootF.RootFun;
+    assert(ASTRootF);
+    for (auto *Param : ASTRootF->parameters()) {
+      RootF.Args.insert(Param);
     }
-    outs() << "\n alloc: ";
-    for (auto *v : refd) {
-      outs() << v->getName() << ", ";
+    auto &locals = RootF.Locals;
+
+    for (auto &bb : RootF) {
+      for (auto &I : *bb) {
+
+        for (auto it = ExprIdentifierIterator(I->innerStmt); !it.done(); ++it) {
+          IRVarRef D = (*it)->getDecl();
+          if (D && (D->getLexicalDeclContext() != ASTRootF->getLexicalDeclContext())) {
+            locals.insert(D);
+          }
+        }
+
+        if (I->Lhs) {
+          locals.insert(I->Lhs);
+        }
+      }
     }
-    outs() << "\n";
+
+    for (auto *Arg: RootF.Args) {
+      RootF.Locals.erase(Arg);
+    }
   }
 
 public:
@@ -197,6 +217,7 @@ public:
     for (int p = 0; p < Paths.size(); p++) {
       auto &Path = Paths[p];
       for (auto *B : Path) {
+        IRFunction *SpawnNextDest = nullptr;
         if (B->Terminator) {
           if (isa<CilkSyncStmt>(B->Terminator->innerStmt)) {
             auto *succBb = *(B->Succs.begin());
@@ -204,14 +225,31 @@ public:
             assert(PathLookup.find(succBb) != PathLookup.end());
             assert(PathLookup[succBb] > 0);
             B->Terminator->Kind = IRStmt::SpawnNext;
-            B->Terminator->SpawnNextDest = ContFuns[PathLookup[succBb] - 1];
+            SpawnNextDest = ContFuns[PathLookup[succBb] - 1];
+            B->Terminator->SpawnNextDest = SpawnNextDest;
+            
             B->Succs.clear();
           }
         }
         if (p > 0) {
           B->getParent()->moveBlock(B, ContFuns[p - 1]);
         }
+        if (SpawnNextDest) {
+          B->getParent()->SpawnNext2Cont[B] = SpawnNextDest;
+        }
       }
+    }
+
+    analyzeRoot(F);
+
+    outs() << "Root:\n";
+    F.dumpArgs(outs());
+
+    int I = 0;
+    for (auto &CF: ContFuns) {
+      outs() << "ContF" << CF->getInd() << ":\n";
+      CF->dumpArgs(outs());
+      I++;
     }
   }
 };

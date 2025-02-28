@@ -1,9 +1,5 @@
 #include <cilk/cilk.h>
 
-long gib(long x) {
-  return x +2;
-}
-
 long fib(long n) {
   long w;
   long *p;
@@ -15,17 +11,17 @@ long fib(long n) {
     long z = *p;
   } else {
     long x, y, z, a;
-
     for (int n = 0; n < 8; n++) {
-      x = cilk_spawn gib(n-1);
+      x = cilk_spawn fib(n-1);
       y = cilk_spawn fib(n-2);
     }
     cilk_sync;
+    long D;
     a = cilk_spawn fib(x-1);
     z = cilk_spawn fib(n-3);
     cilk_sync;
     
-    w = x+y + a*z;
+    w = x+y + a*z + D;
   }
   return w;
 }
