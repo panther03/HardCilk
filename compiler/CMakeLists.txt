@@ -39,6 +39,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Source file
 set(SOURCE_FILES
     src/main.cpp
+    src/IR.cpp
 )
 
 # Add executable

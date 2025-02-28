@@ -8,7 +8,7 @@
 
 #include "Cilk2IR.hpp"
 #include "IR.hpp"
-#include "CreateContinuationPaths.hpp"
+#include "CreateContinuationFuns.hpp"
 
 using namespace clang;
 using namespace clang::tooling;
@@ -17,16 +17,6 @@ using namespace clang::driver;
 
 // static cl::OptionCategory MyToolCategory("cilk2vitis options");
 // static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
-
-// so much for header only...
-void IRBasicBlock::iteratePreds(std::function<void(IRBasicBlock* B)> CB) {
-  for (auto &B : *Parent) {
-    auto &BSuccs = (B.get())->Succs;
-    if (BSuccs.find(this) != BSuccs.end()) {
-      CB(B.get());
-    }
-  }
-}
 
 
 class Cilk2Vitis : public clang::ASTConsumer {
@@ -57,23 +47,28 @@ public:
       Visitor.TraverseDecl(Decl);
     }
 
-    P.print(llvm::outs(), Context);
+    //P.print(llvm::outs(), Context);
 
     std::error_code EC;
     llvm::raw_fd_ostream DotFile("irbefore.dot", EC, llvm::sys::fs::OF_Text);
     if (EC) {
       PANIC("could not open file irbefore.dot");
     }
-    P.front()->dumpGraph(DotFile, Context);
+    P.dumpGraph(DotFile, Context);
+    std::vector<IRFunction*> WorkList; 
     for (auto &F: P) {
-      // F.get()->dumpGraph(Context);
-      CreateContinuationPaths(*F.get());
+      WorkList.push_back(F.get());
+    }
+
+    for (auto &F: WorkList) {
+      CreateContinuationFuns CCF(*F);
     }
     llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
     if (EC) {
       PANIC("could not open file ir.dot");
     }
-    P.front()->dumpGraph(DotFile2, Context);
+    P.dumpGraph(DotFile2, Context);
+    //P.print(llvm::outs(), Context);
     
   }
 };

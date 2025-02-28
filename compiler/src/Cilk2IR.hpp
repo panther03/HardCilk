@@ -3,27 +3,21 @@
 #include <clang/AST/ASTConsumer.h>
 #include <clang/AST/RecursiveASTVisitor.h>
 #include <clang/Analysis/CFG.h>
-#include <clang/Basic/SourceManager.h>
-
-#include <iostream>
 
 #include "IR.hpp"
 #include "util.hpp"
+#include "clang/AST/Stmt.h"
 
 class Cilk2IRVisitor : public clang::RecursiveASTVisitor<Cilk2IRVisitor> {
 private:
   clang::ASTContext *Context;
-  struct {
-    IRFunction *func;
-  } TraverseContext;
   IRProgram &P;
-  std::unordered_map<const Stmt *, IRBasicBlock *> Ast2IrDestination;
-  const Stmt *lastStmt;
 
-  void functionCFG2IR(CFG *Cfg) {
+  void functionCFG2IR(const FunctionDecl* Decl, CFG *Cfg) {
     std::unordered_map<CFGBlock *, std::pair<IRBasicBlock *, IRBasicBlock *>>
         Cfg2IRLookup;
     auto *IrF = P.createFunc();
+    IrF->RootFun = Decl;
     for (auto *CfgB : *Cfg) {
       auto *IrB = IrF->createBlock();
       auto *IrBStart = IrB;
@@ -49,7 +43,7 @@ private:
             }
             IrB = NewIrB;
           } else {
-            Ast2IrDestination[S] = IrB;
+            P.Ast2IrDestination[S] = IrB;
           }
 
           break;
@@ -113,7 +107,7 @@ private:
       // note: don't care about +=, -=, etc.
       // these depend on the previous value so not an LHS
       if (BS->isAssignmentOp()) {
-        const NamedDecl *D = nullptr;
+        IRVarRef D = nullptr;
         if (auto *ICE = dyn_cast<ImplicitCastExpr>(BS->getLHS())) {
           if (auto *DRE = dyn_cast<DeclRefExpr>(ICE)) {
             D = DRE->getDecl();
@@ -147,7 +141,7 @@ public:
             Decl->getName().str().c_str());
       return false;
     }
-    functionCFG2IR(Cfg.get());
+    functionCFG2IR(Decl, Cfg.get());
     //Cfg->print(llvm::outs(), Context->getLangOpts(), true);
     //Cfg->viewCFG(Context->getLangOpts());
     return true;
@@ -163,19 +157,46 @@ public:
   //  return true;
   //}
 
-  bool VisitStmt(const Stmt *Stmt) {
-    if (isa<Expr>(Stmt) || isa<DeclStmt>(Stmt) || isa<ReturnStmt>(Stmt)) {
+  bool VisitStmt(const Stmt *S) {
+    if (isa<Expr>(S) || isa<DeclStmt>(S) || isa<ReturnStmt>(S)) {
       return true;
     }
-    for (const auto *child : Stmt->children()) {
-      if (Ast2IrDestination.find(child) != Ast2IrDestination.end()) {
-        IRStmt *IrS = makeIRStmt(child);
-        if (IrS) {
-          Ast2IrDestination[child]->pushStmt(IrS);
+    std::unordered_map<const Stmt *, IRStmt*> ToReplace;
+    if (auto *FS = dyn_cast<ForStmt>(S)) {
+      auto IRS = new IRStmt(FS, nullptr);
+      IRS->Kind = IRStmt::ForInit;
+      ToReplace[FS->getInit()] = IRS;
+      IRS = new IRStmt(FS, nullptr);
+      IRS->Kind = IRStmt::ForInc;
+      ToReplace[FS->getInc()] = std::move(IRS);
+      ToReplace[FS->getCond()] = nullptr;
+    } else if (auto *IS = dyn_cast<IfStmt>(S)) {
+      ToReplace[IS->getCond()] = nullptr;
+    }
+
+    for (const auto *child : S->children()) {
+      if (P.Ast2IrDestination.find(child) != P.Ast2IrDestination.end()) {
+        if (ToReplace.find(child) != ToReplace.end()) {
+          auto Replacement = ToReplace[child];
+          ToReplace.erase(child);
+          if (Replacement) {
+            P.Ast2IrDestination[child]->pushStmt(Replacement);
+          }         
+        } else {
+          IRStmt *IrS = makeIRStmt(child);
+          if (IrS) {
+            P.Ast2IrDestination[child]->pushStmt(IrS);
+          }
         }
       }
     }
 
+    // Cleanup statements we didn't get to replace
+    for (const auto & [K, V] : ToReplace) {
+      if (V) {
+        delete V;
+      }
+    }
     return true;
   }
 };

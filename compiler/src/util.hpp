@@ -1,7 +1,9 @@
 #pragma once
 #include <clang/AST/Stmt.h>
+#include <clang/AST/Expr.h>
 
 #include <stdio.h>
+#include <deque>
 
 #define BRED "\e[1;31m"
 #define BHGREEN "\e[1;92m"

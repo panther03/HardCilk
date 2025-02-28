@@ -4,34 +4,41 @@
 
 #include <memory>
 #include <vector>
-#include <regex>
+#include <set>
 
-#include "util.hpp"
+#include "clang/AST/Decl.h"
 
 using namespace clang;
+
+typedef const clang::NamedDecl* IRVarRef;
 
 class IRStmt;
 class IRBasicBlock;
 class IRFunction;
 class IRProgram;
 
+// TODO: make this an actual class hierarchy instead of stuffing everything into the base class
 class IRStmt {
 public:
+  enum {
+    Default,
+    ForInc,
+    ForInit,
+    SpawnNext
+  } Kind;
   const clang::Stmt *innerStmt;
+  const IRFunction* SpawnNextDest = nullptr;
   // A declaration that we are sure this instruction only writes to,
   // and does not need the value of at all.
-  const clang::NamedDecl *Lhs = nullptr;
-  IRStmt(const clang::Stmt *innerStmt, const clang::NamedDecl *Lhs = nullptr) : innerStmt(innerStmt), Lhs(Lhs) {}
+  IRVarRef Lhs = nullptr;
+  IRStmt(const clang::Stmt *innerStmt, IRVarRef Lhs = nullptr) : innerStmt(innerStmt), Lhs(Lhs) {}
 
-  void printAllIdentifiers() {
-    for (auto it = ExprIdentifierIterator(innerStmt); !it.done(); ++it) {
-      llvm::outs() << (*it)->getNameInfo().getAsString() << "\n";
-    }
-  }
+  void printAllIdentifiers();
 };
 
 class IRBasicBlock {
 private:
+  // TODO: no reason to have this last layer of indirection, should just store the irstmts here
   using IRStmtPtr = std::unique_ptr<IRStmt>;
   std::vector<IRStmtPtr> Stmts;
   IRFunction *Parent;
@@ -40,77 +47,22 @@ private:
 public:
   std::set<IRBasicBlock *> Succs;
   IRStmtPtr Terminator;
+  friend class IRFunction;
 
   IRBasicBlock(unsigned Ind, IRFunction* Parent) : Ind(Ind), Parent(Parent) {}
   void iteratePreds(std::function<void(IRBasicBlock* B)> CB);
 
   void pushStmt(IRStmt *stmt) { Stmts.push_back(IRStmtPtr(stmt)); }
   // Clones contents of basic block. Does not clone predecessors and successors.
-  void clone(IRBasicBlock *Dest) {
-    for (auto &Stmt : Stmts) {
-      Dest->pushStmt(new IRStmt(Stmt.get()->innerStmt, Stmt.get()->Lhs));
-    }
-    if (Terminator != nullptr) {
-      Dest->Terminator = std::make_unique<IRStmt>(Terminator.get()->innerStmt);
-    }
-  }
+  void clone(IRBasicBlock *Dest);
 
-  void graphPrintStmt(llvm::raw_ostream &out, clang::ASTContext &Context, const Stmt* S, const char *NewlineSymbol) {
-    llvm::SmallString<256> MsgBuffer;
-    llvm::raw_svector_ostream Msg(MsgBuffer);
+  void graphPrintStmt(llvm::raw_ostream &out, clang::ASTContext &Context, const Stmt* S, const char *NewlineSymbol);
 
-    S->printPretty(Msg, nullptr, Context.getPrintingPolicy(), 0U, NewlineSymbol);
-    
-    // uhhhhhh
-    // yyea
-    auto s = std::regex_replace(MsgBuffer.str().str(), std::regex("<"), "\\<");
-    //s = std::regex_replace(s, std::regex(">"), "\\>");
-    out << s;
-  }
+  void print(llvm::raw_ostream &out, clang::ASTContext &Context, const char* NewlineSymbol);
 
-  void print(llvm::raw_ostream &out, clang::ASTContext &Context, const char* NewlineSymbol)  {
-    int I = 1;
-    int j = 0;
-    for (auto &Stmt : Stmts) {
-      out << "   " << I << ": ";
-      if (Stmt->Lhs) {
-        out << Stmt->Lhs->getName() << " = ";
-        j++;
-      }
-      graphPrintStmt(out, Context, Stmt->innerStmt, NewlineSymbol);
-      if (isa<Expr>(Stmt->innerStmt)) 
-        out << ";" << NewlineSymbol;
-      I++;
-    }
-    if (Terminator != nullptr) {
-      const Stmt *S = Terminator->innerStmt;
-      if (auto *IS = dyn_cast<IfStmt>(S)) {
-        out << "   T: if (";
-        graphPrintStmt(out, Context, IS->getCond(), NewlineSymbol);
-        out << ")" << NewlineSymbol;
-      } else if (auto *FS = dyn_cast<ForStmt>(S)) {
-        out << "   T : for (";
-        graphPrintStmt(out, Context, FS->getInit(), "");
-        out << "; ";
-        graphPrintStmt(out, Context, FS->getCond(), "");
-        out << "; ";
-        graphPrintStmt(out, Context, FS->getInc(), "");
-        out << ")" << NewlineSymbol;
-      } else if (auto *RS = dyn_cast<ReturnStmt>(S)) {
-        out << "   T: return ";
-        graphPrintStmt(out, Context, RS->getRetValue(), NewlineSymbol);
-        out << NewlineSymbol;
-      } else if (isa<CilkSyncStmt>(S)){
-        out << "   T: sync" << NewlineSymbol;
-      }
-    }
-  }
-  void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
-    out << "\"{ [B" << getInd();
-    out << "]\\l";
-    print(out, Context, "\\l");
-    out << "}\"";
-  }
+  void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context);
+
+  void moveBlock(IRFunction* NewParent);
 
   using IRBlockListTy = std::vector<IRStmtPtr>;
   using iterator = IRBlockListTy::iterator;
@@ -131,60 +83,28 @@ public:
 class IRFunction {
 private:
   using IRBlockPtr = std::unique_ptr<IRBasicBlock>;
-  std::vector<IRBlockPtr> Blocks;
+  std::list<IRBlockPtr> Blocks;
   IRProgram *Parent;
+  unsigned Ind;
 
 public:
-  IRBasicBlock *Entry;
+  const FunctionDecl* RootFun = nullptr;
+  IRBasicBlock *Entry = nullptr;
+  std::set<IRVarRef> Args;
+  std::set<IRVarRef> Locals;
+  friend class IRBasicBlock;
+  friend class IRProgram;
 
-  IRFunction(IRProgram *Parent) : Parent(Parent) {}
-  IRBasicBlock *createBlock() {
-    IRBlockPtr B = std::make_unique<IRBasicBlock>(Blocks.size(), this);
-    IRBasicBlock *Bp = B.get();
-    Blocks.push_back(std::move(B));
-    return Bp;
-  }
+  IRFunction(unsigned Ind, IRProgram *Parent) : Parent(Parent), Ind(Ind) {}
+  IRBasicBlock *createBlock();
 
-  void print(llvm::raw_ostream &out, clang::ASTContext &Context) {
-    int i = 0;
-    for (auto &B: Blocks) {
-      fprintf(stdout, BHGREEN "Block %d" COLOR_RESET "\n", i);
-      out << "PREDS: ";
-      B->iteratePreds([&] (IRBasicBlock *Pred) -> void {
-        out << Pred->getInd() << " ";
-      });
-      out << "\n";
-      B->print(out, Context, "\n");
-      out << "SUCCS: ";
-      for (auto *Succ: B->Succs) {
-        out << Succ->getInd() << " ";
-      }
-      out << "\n\n\n";
-      i++;
-    }
-  }
+  void print(llvm::raw_ostream &out, clang::ASTContext &Context);
 
-  void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
-    out << "digraph unnamed {\n";
-    for (auto &B: Blocks) {
-      auto *BB = B.get();
-      out << "    Node" << BB->getInd();
-      out << " [shape=record,label=";
-      BB->dumpGraph(out, Context);
-      out << " ];\n";
-    }
-    
-    for (auto &B: Blocks) {
-      for (auto &Succ: B.get()->Succs) {
-        out << "    Node" << B.get()->getInd();
-        out << " -> Node" << Succ->getInd();
-        out << ";\n";
-      }
-    }
-    out << "}\n";
-  }
+  void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context);
 
-  using IRBlockListTy = std::vector<IRBlockPtr>;
+  void moveBlock(IRBasicBlock *B, IRFunction *Dest);
+
+  using IRBlockListTy = std::list<IRBlockPtr>;
   using iterator = IRBlockListTy::iterator;
   using const_iterator = IRBlockListTy::const_iterator;
 
@@ -209,20 +129,13 @@ private:
   std::vector<IRFuncPtr> Funcs;
 
 public:
+  std::unordered_map<const Stmt *, IRBasicBlock *> Ast2IrDestination;
+
   IRProgram() {}
-  IRFunction *createFunc() {
-    IRFuncPtr F = std::make_unique<IRFunction>(this);
-    IRFunction *Fp = F.get();
-    Funcs.push_back(std::move(F));
-    return Fp;
-  }
+  IRFunction *createFunc();
 
-  void print(llvm::raw_ostream &out, clang::ASTContext &Context) {
-    for (auto &F: Funcs) {
-      F.get()->print(out, Context);
-    }
-  }
-
+  void print(llvm::raw_ostream &out, clang::ASTContext &Context);  
+  void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context);
 
   using IRFuncListTy = std::vector<IRFuncPtr>;
   using iterator = IRFuncListTy::iterator;

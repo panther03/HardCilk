@@ -1,31 +1,27 @@
 #pragma once
 
+#include <clang/AST/StmtCilk.h>
 #include <llvm/ADT/SetVector.h>
 #include <set>
-#include <string>
 #include <unordered_map>
 
 #include "IR.hpp"
+#include "util.hpp"
 
 using namespace llvm;
 
-struct ContFunctionInfo {
-  std::set<const NamedDecl*> args;
-  std::set<const NamedDecl*> locals;
-};
-
-struct CreateContinuationPaths {
+struct CreateContinuationFuns {
   // Each "path" in this vector will become a function.
   // The first path corresponds to the original function.
   // Note that the sets need to be ordered to preserve DFS order,
   // allowing us to compute the values actually needed by the path
   std::vector<SetVector<IRBasicBlock *>> Paths;
   std::unordered_map<IRBasicBlock *, int> PathLookup;
-  std::vector<ContFunctionInfo> Infos;
+  std::vector<IRFunction *> ContFuns;
 
 private:
   IRBasicBlock *duplicateBasicBlock(IRBasicBlock *B,
-    SetVector<IRBasicBlock *> &CurrPath) {
+                                    SetVector<IRBasicBlock *> &CurrPath) {
     IRBasicBlock *CloneBB = B->getParent()->createBlock();
     B->clone(CloneBB);
 
@@ -34,7 +30,7 @@ private:
       CloneBB->Succs.insert(Succ);
     }
 
-    B->iteratePreds([&] (IRBasicBlock *Pred) -> void {
+    B->iteratePreds([&](IRBasicBlock *Pred) -> void {
       if (CurrPath.contains(Pred)) {
         Pred->Succs.erase(B);
         Pred->Succs.insert(CloneBB);
@@ -66,8 +62,7 @@ private:
       Paths[CurrLevel].insert(B);
       PathLookup.insert(std::make_pair(B, CurrLevel));
 
-      if (B->Terminator &&
-          isa<CilkSyncStmt>(B->Terminator->innerStmt)) {
+      if (B->Terminator && isa<CilkSyncStmt>(B->Terminator->innerStmt)) {
         // sync instruction should have only one successor
         IRBasicBlock *SISucc = *(B->Succs.begin());
         if (PathLookup.find(SISucc) != PathLookup.end()) {
@@ -97,10 +92,11 @@ private:
   // TODO: this function is not going to handle more complex cases like
   // a store being present in only one branch and a load at the join
   // (so the value is free for the whole function)
-  void analyzePath(ContFunctionInfo &c, SetVector<IRBasicBlock *> &path,
-                   std::set<const NamedDecl *> *inFrees) {
-    std::set<const NamedDecl *> &free = c.args;
-    std::set<const NamedDecl *> &refd = c.locals;
+  void analyzePath(const DeclContext *RootCtx, IRFunction *CF,
+                   SetVector<IRBasicBlock *> &path,
+                   std::set<IRVarRef> *inFrees) {
+    std::set<IRVarRef> &free = CF->Args;
+    std::set<IRVarRef> &refd = CF->Locals;
 
     // Values that will be used in the proceeding blocks regardless of whether
     // they are used here. Only removed if created here.
@@ -112,9 +108,10 @@ private:
     for (auto &bb : path) {
       for (auto &I : *bb) {
 
-        for (auto it = ExprIdentifierIterator(I->innerStmt); !it.done(); ++it) { 
-          const NamedDecl* D = (*it)->getDecl();
-          if (D && (refd.find(D) == refd.end())) {
+        for (auto it = ExprIdentifierIterator(I->innerStmt); !it.done(); ++it) {
+          IRVarRef D = (*it)->getDecl();
+          if (D && (D->getLexicalDeclContext() != RootCtx) &&
+              (refd.find(D) == refd.end())) {
             free.insert(D);
             refd.insert(D);
           }
@@ -124,38 +121,6 @@ private:
           refd.insert(I->Lhs);
           free.erase(I->Lhs);
         }
-        
-
-        
-        /*
-        unsigned opstart = 0;
-        unsigned opend = I.getNumOperands();
-        if (auto *loadInst = dyn_cast<LoadInst>(&I)) {
-          auto *op = loadInst->getPointerOperand();
-          refd.insert(op);
-        } else if (auto *storeInst = dyn_cast<StoreInst>(&I)) {
-          // Only marking this destination as seen if not already referenced
-          // (i.e. loaded or stored before.)
-          auto *op = storeInst->getPointerOperand();
-          if (refd.find(op) == refd.end()) {
-            refd.insert(op);
-            free.erase(op);
-            seen.insert(op);
-          }
-          opstart = 0;
-          opend = storeInst->getPointerOperandIndex();
-        }*/
-
-
-        /*for (unsigned i = opstart; i < opend; ++i) {
-          Value *operand = I.getOperand(i);
-          if ((isa<Argument>(operand) || isa<Instruction>(operand)) &&
-              (seen.find(operand) == seen.end())) {
-            free.insert(operand);
-          }
-        }
-        free.erase(&I);
-        seen.insert(&I);*/
       }
     }
     for (auto *v : free) {
@@ -175,15 +140,15 @@ private:
   }
 
 public:
-  CreateContinuationPaths(IRFunction &F) {
+  CreateContinuationFuns(IRFunction &F) {
+    assert(F.RootFun);
     createSyncPaths(F);
 
     if (Paths.size() == 1) {
       // Not a function with syncs
       return;
     }
-    return;
-    
+
     std::deque<IRBasicBlock *> todo;
     for (auto &B : F) {
       // don't care about the original function
@@ -195,7 +160,9 @@ public:
       }
     }
 
-    Infos.resize(Paths.size() - 1);
+    for (int p = 0; p < Paths.size() - 1; p++) {
+      ContFuns.push_back(F.getParent()->createFunc());
+    }
     // just used for checking assumptions
     std::vector<bool> visited(Paths.size() - 1, 0);
 
@@ -207,27 +174,44 @@ public:
       if (PathLookup[bb] == 0)
         continue;
       int path = PathLookup[bb] - 1;
-      std::cout << path << std::endl;
       // we should only visit a path once, because sync continue blocks should
       // only have one parent
       // TODO: does this assumption make sense?
       assert(!visited[path]);
 
-      std::set<const NamedDecl *> *inFrees = NULL;
+      std::set<IRVarRef> *inFrees = NULL;
       if (auto *succBb = *(bb->Succs.begin())) {
-        outs() << bb->getInd() << "\n";
         assert(PathLookup.find(succBb) != PathLookup.end());
-        inFrees = &(Infos[PathLookup[succBb] - 1].args);
+        inFrees = &(ContFuns[PathLookup[succBb] - 1]->Args);
       }
 
-      analyzePath(Infos[path], Paths[path + 1], inFrees);
+      analyzePath(F.RootFun->getLexicalDeclContext(), ContFuns[path], Paths[path + 1], inFrees);
       visited[path] = true;
 
       auto *startBb = Paths[path + 1][0];
 
-      startBb->iteratePreds([&] (IRBasicBlock *Pred) -> void {
-        todo.push_front(Pred);
-      });
+      startBb->iteratePreds(
+          [&](IRBasicBlock *Pred) -> void { todo.push_front(Pred); });
+    }
+
+    for (int p = 0; p < Paths.size(); p++) {
+      auto &Path = Paths[p];
+      for (auto *B : Path) {
+        if (B->Terminator) {
+          if (isa<CilkSyncStmt>(B->Terminator->innerStmt)) {
+            auto *succBb = *(B->Succs.begin());
+            assert(succBb);
+            assert(PathLookup.find(succBb) != PathLookup.end());
+            assert(PathLookup[succBb] > 0);
+            B->Terminator->Kind = IRStmt::SpawnNext;
+            B->Terminator->SpawnNextDest = ContFuns[PathLookup[succBb] - 1];
+            B->Succs.clear();
+          }
+        }
+        if (p > 0) {
+          B->getParent()->moveBlock(B, ContFuns[p - 1]);
+        }
+      }
     }
   }
 };
