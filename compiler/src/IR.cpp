@@ -189,6 +189,12 @@ void IRFunction::dumpArgs(llvm::raw_ostream &out) {
   for (auto *v : Locals) {
     out << v->getName() << ", ";
   }
+  if (!Materialized.empty()) {
+    out << "\n\tMaterialized: ";
+    for (auto *v : Materialized) {
+      out << v->getName() << ", ";
+    }
+  }
   out << "\n";
 }
 

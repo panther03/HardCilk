@@ -24,7 +24,8 @@ public:
     Default,
     ForInc,
     ForInit,
-    SpawnNext
+    SpawnNext,
+    VoidSpawn
   } Kind;
   const clang::Stmt *innerStmt;
   const IRFunction* SpawnNextDest = nullptr;
@@ -92,10 +93,11 @@ public:
   IRBasicBlock *Entry = nullptr;
   std::set<IRVarRef> Args;
   std::set<IRVarRef> Locals;
+  std::set<IRVarRef> Materialized;
   friend class IRBasicBlock;
   friend class IRProgram;
-  std::unordered_map<const IRStmt*, const IRBasicBlock*> Spawn2SpawnNext;
-  std::unordered_map<const IRBasicBlock*, const IRFunction*> SpawnNext2Cont;
+  std::unordered_map<const IRStmt*, IRBasicBlock*> Spawn2SpawnNext;
+  std::unordered_map<const IRBasicBlock*, IRFunction*> SpawnNext2Cont;
 
   IRFunction(unsigned Ind, IRProgram *Parent) : Parent(Parent), Ind(Ind) {}
   IRBasicBlock *createBlock();
