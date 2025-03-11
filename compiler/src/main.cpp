@@ -2,85 +2,58 @@
 #include <clang/Basic/SourceManager.h>
 #include <clang/Frontend/CompilerInstance.h>
 #include <clang/Tooling/Tooling.h>
-#include <llvm/ADT/IntrusiveRefCntPtr.h>
+#include <clang/AST/Stmt.h>
+#include <clang/Basic/SourceLocation.h>
 
 #include <iostream>
 
-#include "Cilk2IR.hpp"
+
 #include "IR.hpp"
-#include "CreateContinuationFuns.hpp"
-#include "SetupArgsLocals.hpp"
-#include "clang/AST/Stmt.h"
-#include "clang/Basic/SourceLocation.h"
+#include "OpenCilk2IR.hpp"
+#include "MakeExplicit.hpp"
+#include "util.hpp"
 
 using namespace clang;
 using namespace clang::tooling;
 using namespace llvm;
 using namespace clang::driver;
 
-// static cl::OptionCategory MyToolCategory("cilk2vitis options");
-// static cl::extrahelp CommonHelp(CommonOptionsParser::HelpMessage);
-
-
-class Cilk2Vitis : public clang::ASTConsumer {
+class CilkConvert : public clang::ASTConsumer {
 private:
   clang::ASTContext *Context;
   PreprocessingRecord *PPRec;
   SourceManager &SM;
 
-  IRProgram P;
-  Cilk2IRVisitor Visitor;
-  
+  IRProgram P;  
   NullStmt Sentinel;
 
 public:
-  explicit Cilk2Vitis(clang::ASTContext *Context, PreprocessingRecord *PPRec,
+  explicit CilkConvert(clang::ASTContext *Context, PreprocessingRecord *PPRec,
                       SourceManager &SM)
-      : Context(Context), PPRec(PPRec), SM(SM), Sentinel(SourceLocation()), Visitor(Context, P, Sentinel) {}
+      : Context(Context), PPRec(PPRec), SM(SM), Sentinel(SourceLocation()) {}
 
   void HandleTranslationUnit(clang::ASTContext &Context) {
-    // Only visit declarations declared in the input TU
-    auto Decls = Context.getTranslationUnitDecl()->decls();
-    for (auto &Decl : Decls) {
-      // Ignore declarations out of the main translation unit.
-      //
-      // SourceManager::isInMainFile method takes into account locations
-      // expansion like macro expansion scenario and checks expansion
-      // location instead if spelling location if required.
-      if (!SM.isInMainFile(Decl->getLocation()))
-        continue;
-      Visitor.TraverseDecl(Decl);
-    }
-
-    //P.print(llvm::outs(), Context);
-
     std::error_code EC;
+
+    OpenCilk2IR(P, &Context, SM, Sentinel);
+
     llvm::raw_fd_ostream DotFile("irbefore.dot", EC, llvm::sys::fs::OF_Text);
     if (EC) {
       PANIC("could not open file irbefore.dot");
     }
     P.dumpGraph(DotFile, Context);
-    std::vector<IRFunction*> WorkList; 
-    for (auto &F: P) {
-      WorkList.push_back(F.get());
-    }
-
-    for (auto &F: WorkList) {
-      CreateContinuationFuns CCF(*F);
-      SetupArgsLocals SAL(*F, CCF.ContFuns);
-    }
+    MakeExplicit(P);
     llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
     if (EC) {
       PANIC("could not open file ir.dot");
     }
     P.dumpGraph(DotFile2, Context);
-    //P.print(llvm::outs(), Context);
     
   }
 };
 
 // Frontened action to create the custom AST consumer
-class Cilk2VitisAction : public clang::ASTFrontendAction {
+class CilkConvertAction : public clang::ASTFrontendAction {
 public:
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &CI, StringRef file) override {
@@ -91,8 +64,7 @@ public:
     }
     clang::PreprocessingRecord *PPRec = PP.getPreprocessingRecord();
 
-    return std::make_unique<Cilk2Vitis>(&CI.getASTContext(), PPRec,
-                                        CI.getSourceManager());
+    return std::make_unique<CilkConvert>(&CI.getASTContext(), PPRec, CI.getSourceManager());
   }
 
   /*std::string extractFileName() {
@@ -153,7 +125,7 @@ int main(int argc, const char **argv) {
       new clang::FileManager(FSOpts));
 
   clang::tooling::ToolInvocation invocation(
-      compilationFlags, std::make_unique<Cilk2VitisAction>(), Files.get(),
+      compilationFlags, std::make_unique<CilkConvertAction>(), Files.get(),
       PCHContainerOps);
 
   return !invocation.run();

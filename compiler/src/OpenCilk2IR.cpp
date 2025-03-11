@@ -1,12 +1,9 @@
-#pragma once
-
 #include <clang/AST/ASTConsumer.h>
 #include <clang/AST/RecursiveASTVisitor.h>
 #include <clang/Analysis/CFG.h>
 
-#include "IR.hpp"
+#include "OpenCilk2IR.hpp"
 #include "util.hpp"
-#include "clang/AST/Stmt.h"
 
 class Cilk2IRVisitor : public clang::RecursiveASTVisitor<Cilk2IRVisitor> {
 private:
@@ -206,3 +203,19 @@ public:
     return true;
   }
 };
+
+void OpenCilk2IR(IRProgram &P, clang::ASTContext *Context, SourceManager &SM, NullStmt &Sentinel) {
+  Cilk2IRVisitor Visitor(Context, P, Sentinel);
+  // Only visit declarations declared in the input TU
+  auto Decls = Context->getTranslationUnitDecl()->decls();
+  for (auto &Decl : Decls) {
+    // Ignore declarations out of the main translation unit.
+    //
+    // SourceManager::isInMainFile method takes into account locations
+    // expansion like macro expansion scenario and checks expansion
+    // location instead if spelling location if required.
+    if (!SM.isInMainFile(Decl->getLocation()))
+      continue;
+    Visitor.TraverseDecl(Decl);
+  }
+}

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 # Project name
-project(cilk2vitis)
+project(cilkconvert)
 
 if(NOT OPENCILK_HOME)
     set(OPENCILK_HOME "/opt/OpenCilk")
@@ -36,21 +36,24 @@ add_definitions(${LLVM_DEFINITIONS})
 # Export compile commands for Clang tooling
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include_directories("include")
 # Source file
 set(SOURCE_FILES
     src/main.cpp
     src/IR.cpp
+    src/OpenCilk2IR.cpp
+    src/MakeExplicit.cpp
 )
 
 # Add executable
-add_executable(cilk2vitis ${SOURCE_FILES})
+add_executable(cilkconvert ${SOURCE_FILES})
 
-set_target_properties(cilk2vitis PROPERTIES
+set_target_properties(cilkconvert PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
 # Link against LLVM and Clang libraries
-target_link_libraries(cilk2vitis PRIVATE
+target_link_libraries(cilkconvert PRIVATE
     LLVMCore
     clangTooling
     clangFrontend
