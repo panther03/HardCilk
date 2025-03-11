@@ -35,7 +35,7 @@ private:
 
     B->iteratePreds([&](IRBasicBlock *Pred) -> void {
       if (CurrPath.contains(Pred)) {
-        Pred->Succs.erase(B);
+        Pred->Succs.remove(B);
         Pred->Succs.insert(CloneBB);
       }
     });
@@ -178,6 +178,8 @@ public:
       if (PathLookup[B.get()] == 0)
         continue;
 
+      // every function we will need to create has its
+      // own terminator block, add these
       if (B->Succs.empty()) {
         todo.push_back(B.get());
       }
@@ -203,11 +205,13 @@ public:
       assert(!visited[path]);
 
       std::set<IRVarRef> *inFrees = NULL;
-      if (auto *succBb = *(bb->Succs.begin())) {
-        assert(PathLookup.find(succBb) != PathLookup.end());
-        inFrees = &(ContFuns[PathLookup[succBb] - 1]->Args);
+      if (!bb->Succs.empty())  {
+        if (auto *succBb = *(bb->Succs.begin())) {
+            assert(PathLookup.find(succBb) != PathLookup.end());
+            inFrees = &(ContFuns[PathLookup[succBb] - 1]->Args);
+        }
       }
-
+    
       analyzePath(F.RootFun->getLexicalDeclContext(), ContFuns[path], Paths[path + 1], inFrees);
       visited[path] = true;
 
@@ -254,6 +258,43 @@ public:
       CF->dumpArgs(outs());
       I++;
     }
+  }
+};
+
+///////////////////////
+// ScopeStartMapper //
+/////////////////////
+
+class ScopeStartMapper : public ScopedIRTraverser {
+  private:
+  std::unordered_map<IRBasicBlock*, IRBasicBlock*> &ScopeStarts;
+  std::vector<IRBasicBlock*> ScopeStack;
+  bool pushNext = false;
+
+  void handleScope(ScopeEvent SE) override {
+    if (SE == ScopeEvent::Open || SE == ScopeEvent::Else) {
+      pushNext = true;
+    }
+    if (SE == ScopeEvent::Close || SE == ScopeEvent::Else) {
+      ScopeStack.pop_back();
+    }
+  }
+
+  void visitBlock(IRBasicBlock* B) override {
+    if (pushNext) {
+      ScopeStack.push_back(B);
+      pushNext = false;
+    }
+    ScopeStarts[B] = ScopeStack.back();
+  }
+  
+  public: 
+
+  ScopeStartMapper(std::unordered_map<IRBasicBlock*, IRBasicBlock*> &ScopeStarts) : ScopeStarts(ScopeStarts) {}
+
+  void reset(IRBasicBlock* Entry) {
+    ScopeStack.clear();
+    ScopeStack.push_back(Entry);
   }
 };
 
@@ -336,6 +377,20 @@ struct SetupArgsLocals {
     }
   }
 
+  void AddSpawnNextDecls(IRFunction *F, std::unordered_map<IRBasicBlock*, IRBasicBlock*> &ScopeStarts) {
+    for (auto &B: *F) {
+      if (B->Terminator && B->Terminator->Kind == IRStmt::SpawnNext) {
+        auto *DeclB = ScopeStarts[B.get()];
+        assert(DeclB);
+
+        auto *DeclS = new IRStmt(B->Terminator->innerStmt);
+        DeclS->Kind = IRStmt::SpawnNextDecl;
+        DeclS->SpawnNextDest = B->Terminator->SpawnNextDest;
+        DeclB->pushStmt(DeclS);
+      }
+    }
+  }
+
   SetupArgsLocals(IRFunction &Root, std::vector<IRFunction *> &ContFuns) {
     std::vector<IRFunction *> FnWorkList;
     FnWorkList.push_back(&Root);
@@ -343,12 +398,14 @@ struct SetupArgsLocals {
       FnWorkList.push_back(CF);
     }
 
+    std::unordered_map<IRBasicBlock*, IRBasicBlock*> ScopeStarts;
+    ScopeStartMapper SSM(ScopeStarts);
     for (auto F : FnWorkList) {
       FindContForSpawns(F);
-    }
-
-    for (auto F: FnWorkList) {
       PushBackSpawnVars(F);
+      SSM.reset(F->entry());
+      SSM.traverse(*F);
+      AddSpawnNextDecls(F, ScopeStarts);
     }
 
     outs() << "Root:\n";

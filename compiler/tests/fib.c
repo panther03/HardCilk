@@ -12,7 +12,7 @@ long fib(long n) {
   } else {
     long x, y, z, a;
     for (int n = 0; n < 8; n++) {
-      x = cilk_spawn fib(n-1);
+      x = cilk_spawn fib(n-5);
       y = cilk_spawn fib(n-2);
     }
     cilk_sync;

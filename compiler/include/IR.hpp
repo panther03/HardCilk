@@ -1,6 +1,7 @@
 #pragma once
 
 #include <clang/AST/Stmt.h>
+#include <llvm/ADT/SetVector.h>
 
 #include <memory>
 #include <vector>
@@ -25,6 +26,7 @@ public:
     ForInc,
     ForInit,
     SpawnNext,
+    SpawnNextDecl,
     VoidSpawn
   } Kind;
   const clang::Stmt *innerStmt;
@@ -46,7 +48,7 @@ private:
   unsigned Ind;
 
 public:
-  std::set<IRBasicBlock *> Succs;
+  llvm::SetVector<IRBasicBlock *> Succs;
   IRStmtPtr Terminator;
   friend class IRFunction;
 
@@ -155,4 +157,66 @@ public:
   iterator end() { return Funcs.end(); }
   const_iterator begin() const { return Funcs.begin(); }
   const_iterator end() const { return Funcs.end(); }
+};
+
+class ScopedIRTraverser {
+protected: 
+  enum ScopeEvent {
+    None,
+    Open, 
+    Close,
+    Else
+  };
+private:
+ 
+  struct WorkItem {
+    IRBasicBlock* B;
+    ScopeEvent SE;
+
+    WorkItem(ScopeEvent SE0) { B = nullptr; SE = SE0; }
+    WorkItem(IRBasicBlock *B0) { B = B0; SE = None; }
+  };
+
+  std::vector<WorkItem> WorkList;
+  std::unordered_map<IRBasicBlock*, int> JoinCounts;
+  virtual void handleScope(ScopeEvent SE) {}
+  virtual void visitBlock(IRBasicBlock* B) {}
+
+public:
+
+  void traverse(IRFunction &F);
+};
+
+class ScopedIRPrinter : public ScopedIRTraverser {
+  private: 
+  int indent = 0;
+  clang::ASTContext *C;
+
+  void printIndentation() {
+    for (int i = 0; i < indent; i++) {
+      llvm::outs() << "\t";
+    }
+  }
+
+  void handleScope(ScopeEvent SE) override {
+    if (SE == Close || SE == Else) {
+      assert(indent > 0);
+      indent--;
+      printIndentation();
+      llvm::outs() << "}\n";
+    }
+    if (SE == Else) { printIndentation(); llvm::outs() << "else\n"; }
+    if (SE == Open || SE == Else) {
+      printIndentation();
+      llvm::outs() << "{\n";
+      indent++;
+    }
+  }
+
+  void visitBlock(IRBasicBlock* B) override {
+    B->print(llvm::outs(), *C, "\n");
+  }
+
+  public:
+  ScopedIRPrinter(clang::ASTContext *C) : C(C) {} 
 };

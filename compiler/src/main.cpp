@@ -37,18 +37,23 @@ public:
 
     OpenCilk2IR(P, &Context, SM, Sentinel);
 
-    llvm::raw_fd_ostream DotFile("irbefore.dot", EC, llvm::sys::fs::OF_Text);
-    if (EC) {
-      PANIC("could not open file irbefore.dot");
+    {
+      llvm::raw_fd_ostream DotFile("irbefore.dot", EC, llvm::sys::fs::OF_Text);
+      if (EC) {
+        PANIC("could not open file irbefore.dot");
+      }
+      P.dumpGraph(DotFile, Context);
     }
-    P.dumpGraph(DotFile, Context);
     MakeExplicit(P);
-    llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
-    if (EC) {
-      PANIC("could not open file ir.dot");
+    {
+      llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
+      if (EC) {
+        PANIC("could not open file ir.dot");
+      }
+      P.dumpGraph(DotFile2, Context);
     }
-    P.dumpGraph(DotFile2, Context);
-    
+    auto *F0 = P.front().get();
+    ScopedIRPrinter(&Context).traverse(*F0); 
   }
 };
 
