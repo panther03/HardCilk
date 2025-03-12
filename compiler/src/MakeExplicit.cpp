@@ -1,11 +1,12 @@
-#include <clang/AST/StmtCilk.h>
 #include <clang/AST/ExprCilk.h>
+#include <clang/AST/StmtCilk.h>
 #include <llvm/ADT/SetVector.h>
 #include <set>
 #include <unordered_map>
 
 #include "IR.hpp"
 #include "util.hpp"
+#include "clang/AST/Expr.h"
 
 using namespace llvm;
 
@@ -146,7 +147,8 @@ private:
 
         for (auto it = ExprIdentifierIterator(I->innerStmt); !it.done(); ++it) {
           IRVarRef D = (*it)->getDecl();
-          if (D && (D->getLexicalDeclContext() != ASTRootF->getLexicalDeclContext())) {
+          if (D && (D->getLexicalDeclContext() !=
+                    ASTRootF->getLexicalDeclContext())) {
             locals.insert(D);
           }
         }
@@ -157,7 +159,7 @@ private:
       }
     }
 
-    for (auto *Arg: RootF.Args) {
+    for (auto *Arg : RootF.Args) {
       RootF.Locals.erase(Arg);
     }
   }
@@ -186,7 +188,9 @@ public:
     }
 
     for (int p = 0; p < Paths.size() - 1; p++) {
-      ContFuns.push_back(F.getParent()->createFunc());
+      IRFunction *ContF = F.getParent()->createFunc();
+      ContF->NeedsCont = true;
+      ContFuns.push_back(ContF);
     }
     // just used for checking assumptions
     std::vector<bool> visited(Paths.size() - 1, 0);
@@ -205,14 +209,15 @@ public:
       assert(!visited[path]);
 
       std::set<IRVarRef> *inFrees = NULL;
-      if (!bb->Succs.empty())  {
+      if (!bb->Succs.empty()) {
         if (auto *succBb = *(bb->Succs.begin())) {
-            assert(PathLookup.find(succBb) != PathLookup.end());
-            inFrees = &(ContFuns[PathLookup[succBb] - 1]->Args);
+          assert(PathLookup.find(succBb) != PathLookup.end());
+          inFrees = &(ContFuns[PathLookup[succBb] - 1]->Args);
         }
       }
-    
-      analyzePath(F.RootFun->getLexicalDeclContext(), ContFuns[path], Paths[path + 1], inFrees);
+
+      analyzePath(F.RootFun->getLexicalDeclContext(), ContFuns[path],
+                  Paths[path + 1], inFrees);
       visited[path] = true;
 
       auto *startBb = Paths[path + 1][0];
@@ -234,7 +239,7 @@ public:
             B->Terminator->Kind = IRStmt::SpawnNext;
             SpawnNextDest = ContFuns[PathLookup[succBb] - 1];
             B->Terminator->SpawnNextDest = SpawnNextDest;
-            
+
             B->Succs.clear();
           }
         }
@@ -253,7 +258,7 @@ public:
     F.dumpArgs(outs());
 
     int I = 0;
-    for (auto &CF: ContFuns) {
+    for (auto &CF : ContFuns) {
       outs() << "ContF" << CF->getInd() << ":\n";
       CF->dumpArgs(outs());
       I++;
@@ -266,9 +271,9 @@ public:
 /////////////////////
 
 class ScopeStartMapper : public ScopedIRTraverser {
-  private:
-  std::unordered_map<IRBasicBlock*, IRBasicBlock*> &ScopeStarts;
-  std::vector<IRBasicBlock*> ScopeStack;
+private:
+  std::unordered_map<IRBasicBlock *, IRBasicBlock *> &ScopeStarts;
+  std::vector<IRBasicBlock *> ScopeStack;
   bool pushNext = false;
 
   void handleScope(ScopeEvent SE) override {
@@ -280,19 +285,20 @@ class ScopeStartMapper : public ScopedIRTraverser {
     }
   }
 
-  void visitBlock(IRBasicBlock* B) override {
+  void visitBlock(IRBasicBlock *B) override {
     if (pushNext) {
       ScopeStack.push_back(B);
       pushNext = false;
     }
     ScopeStarts[B] = ScopeStack.back();
   }
-  
-  public: 
 
-  ScopeStartMapper(std::unordered_map<IRBasicBlock*, IRBasicBlock*> &ScopeStarts) : ScopeStarts(ScopeStarts) {}
+public:
+  ScopeStartMapper(
+      std::unordered_map<IRBasicBlock *, IRBasicBlock *> &ScopeStarts)
+      : ScopeStarts(ScopeStarts) {}
 
-  void reset(IRBasicBlock* Entry) {
+  void reset(IRBasicBlock *Entry) {
     ScopeStack.clear();
     ScopeStack.push_back(Entry);
   }
@@ -303,18 +309,18 @@ class ScopeStartMapper : public ScopedIRTraverser {
 ////////////////////
 
 struct SetupArgsLocals {
-  IRBasicBlock* DFSTillSpawnNext(IRBasicBlock *StartB) {
-    std::vector<IRBasicBlock*> WorkList;
-    std::set<IRBasicBlock*> SeenList;
+  IRBasicBlock *DFSTillSpawnNext(IRBasicBlock *StartB) {
+    std::vector<IRBasicBlock *> WorkList;
+    std::set<IRBasicBlock *> SeenList;
     WorkList.push_back(StartB);
 
-    IRBasicBlock* FoundSpawnNext = nullptr;
+    IRBasicBlock *FoundSpawnNext = nullptr;
 
     while (!WorkList.empty()) {
       IRBasicBlock *B = WorkList.back();
       WorkList.pop_back();
       SeenList.insert(B);
-      
+
       if (B->Terminator && (B->Terminator->Kind == IRStmt::SpawnNext)) {
         if (FoundSpawnNext) {
           // TODO improve this error message
@@ -335,12 +341,13 @@ struct SetupArgsLocals {
   }
 
   void FindContForSpawns(IRFunction *F) {
-    for (auto &B: *F) {
-      std::vector <IRStmt*> SpawnStatements;
-      for (auto &S: *B) {
+    for (auto &B : *F) {
+      std::vector<IRStmt *> SpawnStatements;
+      for (auto &S : *B) {
         if (auto *BS = dyn_cast<BinaryOperator>(S->innerStmt)) {
-          // This case should never happen. Should have been incorporated into the LHS before.
-          // Unless there is an assignment like a = b = c = spawn, but that should be flagged before.
+          // This case should never happen. Should have been incorporated into
+          // the LHS before. Unless there is an assignment like a = b = c =
+          // spawn, but that should be flagged before.
           assert(!isa<CilkSpawnExpr>(BS->getRHS()));
         } else if (isa<CilkSpawnExpr>(S->innerStmt)) {
           SpawnStatements.push_back(S.get());
@@ -350,7 +357,7 @@ struct SetupArgsLocals {
       if (!SpawnStatements.empty()) {
         IRBasicBlock *SpawnNext = DFSTillSpawnNext(B.get());
         if (SpawnNext) {
-          for (auto &SpawnS: SpawnStatements) {
+          for (auto &SpawnS : SpawnStatements) {
             F->Spawn2SpawnNext[SpawnS] = SpawnNext;
           }
         }
@@ -359,26 +366,29 @@ struct SetupArgsLocals {
   }
 
   void PushBackSpawnVars(IRFunction *F) {
-    for (auto &B: *F) {
-      for (auto &S: *B) {
+    for (auto &B : *F) {
+      for (auto &S : *B) {
         if (isa<CilkSpawnExpr>(S->innerStmt)) {
           S->Kind = IRStmt::VoidSpawn;
           if (S->Lhs) {
             if (F->Spawn2SpawnNext.find(S.get()) == F->Spawn2SpawnNext.end()) {
-              PANIC("Spawn has a return value, but no corresponding spawn next..");
+              PANIC("Spawn has a return value, but no corresponding spawn "
+                    "next..");
             }
             auto *SpawnNextF = F->SpawnNext2Cont[F->Spawn2SpawnNext[S.get()]];
             F->Locals.erase(S->Lhs);
             SpawnNextF->Args.erase(S->Lhs);
-            SpawnNextF->Materialized.insert(S->Lhs);            
+            SpawnNextF->Materialized.insert(S->Lhs);
           }
         }
       }
     }
   }
 
-  void AddSpawnNextDecls(IRFunction *F, std::unordered_map<IRBasicBlock*, IRBasicBlock*> &ScopeStarts) {
-    for (auto &B: *F) {
+  void AddSpawnNextDecls(
+      IRFunction *F,
+      std::unordered_map<IRBasicBlock *, IRBasicBlock *> &ScopeStarts) {
+    for (auto &B : *F) {
       if (B->Terminator && B->Terminator->Kind == IRStmt::SpawnNext) {
         auto *DeclB = ScopeStarts[B.get()];
         assert(DeclB);
@@ -386,7 +396,7 @@ struct SetupArgsLocals {
         auto *DeclS = new IRStmt(B->Terminator->innerStmt);
         DeclS->Kind = IRStmt::SpawnNextDecl;
         DeclS->SpawnNextDest = B->Terminator->SpawnNextDest;
-        DeclB->pushStmt(DeclS);
+        DeclB->pushStmtFront(DeclS);
       }
     }
   }
@@ -398,7 +408,7 @@ struct SetupArgsLocals {
       FnWorkList.push_back(CF);
     }
 
-    std::unordered_map<IRBasicBlock*, IRBasicBlock*> ScopeStarts;
+    std::unordered_map<IRBasicBlock *, IRBasicBlock *> ScopeStarts;
     ScopeStartMapper SSM(ScopeStarts);
     for (auto F : FnWorkList) {
       FindContForSpawns(F);
@@ -412,7 +422,7 @@ struct SetupArgsLocals {
     Root.dumpArgs(outs());
 
     int I = 0;
-    for (auto &CF: ContFuns) {
+    for (auto &CF : ContFuns) {
       outs() << "ContF" << CF->getInd() << ":\n";
       CF->dumpArgs(outs());
       I++;
@@ -424,14 +434,33 @@ struct SetupArgsLocals {
 // Glue //
 /////////
 
-void MakeExplicit(IRProgram &P) {
-    std::vector<IRFunction*> WorkList; 
-    for (auto &F: P) {
-      WorkList.push_back(F.get());
+void MarkContFuns(IRFunction *F) {
+  // Mark functions that need continuations as requiring a continuation.
+  for (auto &B : *F) {
+    for (auto &S : *B) {
+      if (auto *SpawnE = dyn_cast<CilkSpawnExpr>(S->innerStmt)) {
+        if (auto *CallE = dyn_cast<CallExpr>(SpawnE->getSpawnedExpr())) {
+          if (auto *ND = dyn_cast<NamedDecl>(CallE->getCalleeDecl())) {
+            if (F->getParent()->RootFunLookup.find(ND->getNameAsString()) != F->getParent()->RootFunLookup.end()) {
+              auto CF = F->getParent()->RootFunLookup[ND->getNameAsString()];
+              CF->NeedsCont = true;
+            }
+          }
+        }
+      }
     }
+  }
+}
 
-    for (auto &F: WorkList) {
-      CreateContinuationFuns CCF(*F);
-      SetupArgsLocals SAL(*F, CCF.ContFuns);
-    }
+void MakeExplicit(IRProgram &P) {
+  std::vector<IRFunction *> WorkList;
+  for (auto &F : P) {
+    WorkList.push_back(F.get());
+  }
+
+  for (auto &F : WorkList) {
+    CreateContinuationFuns CCF(*F);
+    SetupArgsLocals SAL(*F, CCF.ContFuns);
+    MarkContFuns(F);
+  }
 }

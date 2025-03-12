@@ -15,6 +15,8 @@ private:
     std::unordered_map<CFGBlock *, std::pair<IRBasicBlock *, IRBasicBlock *>>
         Cfg2IRLookup;
     auto *IrF = P.createFunc();
+    std::string fname = Decl->getName().str();
+    P.RootFunLookup[fname] = IrF;
     IrF->RootFun = Decl;
     for (auto *CfgB : *Cfg) {
       auto *IrB = IrF->createBlock();
@@ -183,12 +185,12 @@ public:
           auto Replacement = ToReplace[child];
           ToReplace.erase(child);
           if (Replacement) {
-            P.Ast2IrDestination[child]->pushStmt(Replacement);
+            P.Ast2IrDestination[child]->pushStmtBack(Replacement);
           }         
         } else {
           IRStmt *IrS = makeIRStmt(child);
           if (IrS) {
-            P.Ast2IrDestination[child]->pushStmt(IrS);
+            P.Ast2IrDestination[child]->pushStmtBack(IrS);
           }
         }
       }

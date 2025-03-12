@@ -4,36 +4,18 @@ THREAD(fib);
 THREAD(sum);
 THREAD(main_cont);
 
-
-struct fib_closure : closure { 
+CLOSURE_DEF(fib, 
     int n;
+);
 
-    task_fn_t getTask() override {
-        return &fib;
-    }
-    fib_closure (cont k1, int n): n(n) {k = k1;}
-};
-
-struct sum_closure : closure { 
+CLOSURE_DEF(sum, 
     int arg1;
     int arg2;
+);
 
-    task_fn_t getTask() override {
-        return &sum;
-    }
-
-    sum_closure (cont k1, int arg1, int arg2): arg1(arg1), arg2(arg2) {k = k1;}
-};
-
-struct main_cont_closure: closure {
+CLOSURE_DEF(main_cont,
     int fibResult;
-
-    task_fn_t getTask() override {
-        return &main_cont;
-    }
-
-    main_cont_closure (cont k1, int fibResult): fibResult(fibResult) {k = k1;}
-};
+);
 
 THREAD(sum) {
     sum_closure *sum_args = (sum_closure*)(args.get());
@@ -46,11 +28,16 @@ THREAD(fib) {
         SEND_ARGUMENT(fib_args->k, fib_args->n);
     } else {
         cont x, y;
-        spawn_next<sum_closure> s1 (sum_closure(fib_args->k, 0, 0));
+        sum_closure s1c(fib_args->k);
+        spawn_next<sum_closure> s1 (s1c);
         SN_BIND(s1, &x, arg1);
         SN_BIND(s1, &y, arg2);
-        spawn<fib_closure> f1 ( fib_closure(x, fib_args->n - 1));
-        spawn<fib_closure> f2 ( fib_closure(y, fib_args->n - 2));
+        fib_closure f1c(x);
+        f1c.n = fib_args->n - 1;
+        spawn<fib_closure> f1 ( f1c);
+        fib_closure f2c(y);
+        f2c.n = fib_args->n - 2;
+        spawn<fib_closure> f2 ( f2c);
     }
 }
 
@@ -62,11 +49,15 @@ THREAD(main_cont) {
 
 int main() {
     cont k;
-    spawn_next<main_cont_closure> s1 (main_cont_closure(k, 0));
+    main_cont_closure mcc(CONT_DUMMY);
+    spawn_next<main_cont_closure> s1 (mcc);
+    ((main_cont_closure*)s1.cls)->fibResult = 0;
         // this doesn't make any sense but im too lazy ^^^^
         // to put a null continuation. 
         // doesnt matter tho since it doesnt call k.
     SN_BIND(s1, &k, fibResult);
-    spawn<fib_closure> f ( fib_closure(k, 30) );
+    fib_closure fc(k);
+    fc.n = 30;
+    spawn<fib_closure> f ( fc );
     return 0;
 }

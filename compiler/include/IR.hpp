@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <vector>
+#include <deque>
 #include <set>
 
 #include "clang/AST/Decl.h"
@@ -43,7 +44,7 @@ class IRBasicBlock {
 private:
   // TODO: no reason to have this last layer of indirection, should just store the irstmts here
   using IRStmtPtr = std::unique_ptr<IRStmt>;
-  std::vector<IRStmtPtr> Stmts;
+  std::deque<IRStmtPtr> Stmts;
   IRFunction *Parent;
   unsigned Ind;
 
@@ -55,7 +56,8 @@ public:
   IRBasicBlock(unsigned Ind, IRFunction* Parent) : Ind(Ind), Parent(Parent) {}
   void iteratePreds(std::function<void(IRBasicBlock* B)> CB);
 
-  void pushStmt(IRStmt *stmt) { Stmts.push_back(IRStmtPtr(stmt)); }
+  void pushStmtBack(IRStmt *stmt) { Stmts.push_back(IRStmtPtr(stmt)); }
+  void pushStmtFront(IRStmt *stmt) { Stmts.push_front(IRStmtPtr(stmt)); }
   // Clones contents of basic block. Does not clone predecessors and successors.
   void clone(IRBasicBlock *Dest);
 
@@ -67,7 +69,7 @@ public:
 
   void moveBlock(IRFunction* NewParent);
 
-  using IRBlockListTy = std::vector<IRStmtPtr>;
+  using IRBlockListTy = std::deque<IRStmtPtr>;
   using iterator = IRBlockListTy::iterator;
   using const_iterator = IRBlockListTy::const_iterator;
 
@@ -96,6 +98,7 @@ public:
   std::set<IRVarRef> Args;
   std::set<IRVarRef> Locals;
   std::set<IRVarRef> Materialized;
+  bool NeedsCont = false;
   friend class IRBasicBlock;
   friend class IRProgram;
   std::unordered_map<const IRStmt*, IRBasicBlock*> Spawn2SpawnNext;
@@ -103,6 +106,14 @@ public:
 
   IRFunction(unsigned Ind, IRProgram *Parent) : Parent(Parent), Ind(Ind) {}
   IRBasicBlock *createBlock();
+
+  void printName(llvm::raw_ostream &out) const {
+    if (RootFun) {
+      out << RootFun->getName();
+    } else {
+      out << "sn_" << getInd();
+    }
+  }
 
   void print(llvm::raw_ostream &out, clang::ASTContext &Context);
 
@@ -139,6 +150,7 @@ private:
 
 public:
   std::unordered_map<const Stmt *, IRBasicBlock *> Ast2IrDestination;
+  std::unordered_map<std::string, IRFunction *> RootFunLookup;
 
   IRProgram() {}
   IRFunction *createFunc();

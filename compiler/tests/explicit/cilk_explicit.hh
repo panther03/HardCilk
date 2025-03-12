@@ -34,6 +34,7 @@ public:
     int jc;
 
     virtual task_fn_t getTask() { return nullptr; };
+    closure (cont k): k(k) {}
 };
 
 class spawn_write_dest {
@@ -94,3 +95,12 @@ template <class C> class spawn {
 #define SEND_ARGUMENT(k, n) {*((typeof(n)*)((k).ret)) = (n); ((k).cls)->jc--; return; }
 #define SN_BIND(sn, k, field) {assert(sn.cls); (k)->init(&sn,sn.cls.get()); (k)->ret = (void*)&(sn.cls->field);}
 #define THREAD(fn_name) void fn_name (std::shared_ptr<closure> args)
+#define CLOSURE_DEF(name, ...) \
+struct name##_closure : public closure { \
+    __VA_ARGS__ \
+    using closure::closure; \
+    task_fn_t getTask() override { \
+        return &name; \
+    } \
+};
+#define CONT_DUMMY (cont{})

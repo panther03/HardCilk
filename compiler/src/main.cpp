@@ -8,6 +8,7 @@
 #include <iostream>
 
 
+#include "Cilk1EmuTarget.hpp"
 #include "IR.hpp"
 #include "OpenCilk2IR.hpp"
 #include "MakeExplicit.hpp"
@@ -20,20 +21,19 @@ using namespace clang::driver;
 
 class CilkConvert : public clang::ASTConsumer {
 private:
-  clang::ASTContext *Context;
-  PreprocessingRecord *PPRec;
-  SourceManager &SM;
+  clang::CompilerInstance &CI;
 
   IRProgram P;  
   NullStmt Sentinel;
+  StringRef OutFilename;
 
 public:
-  explicit CilkConvert(clang::ASTContext *Context, PreprocessingRecord *PPRec,
-                      SourceManager &SM)
-      : Context(Context), PPRec(PPRec), SM(SM), Sentinel(SourceLocation()) {}
+  explicit CilkConvert(clang::CompilerInstance &CI, StringRef OutFilename)
+      : CI(CI), Sentinel(SourceLocation()), OutFilename(OutFilename) {}
 
   void HandleTranslationUnit(clang::ASTContext &Context) {
     std::error_code EC;
+    auto &SM = CI.getSourceManager();
 
     OpenCilk2IR(P, &Context, SM, Sentinel);
 
@@ -54,12 +54,16 @@ public:
     }
     auto *F0 = P.front().get();
     ScopedIRPrinter(&Context).traverse(*F0); 
+
+    llvm::raw_fd_ostream Cilk1Out(OutFilename, EC, llvm::sys::fs::OF_Text);
+    PrintCilk1Emu(P, Cilk1Out, Context, CI);
   }
 };
 
 // Frontened action to create the custom AST consumer
 class CilkConvertAction : public clang::ASTFrontendAction {
 public:
+  CilkConvertAction(StringRef OutFilename): OutFilename(OutFilename) {}
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &CI, StringRef file) override {
     clang::Preprocessor &PP = CI.getPreprocessor();
@@ -69,7 +73,7 @@ public:
     }
     clang::PreprocessingRecord *PPRec = PP.getPreprocessingRecord();
 
-    return std::make_unique<CilkConvert>(&CI.getASTContext(), PPRec, CI.getSourceManager());
+    return std::make_unique<CilkConvert>(CI, OutFilename);
   }
 
   /*std::string extractFileName() {
@@ -96,11 +100,13 @@ public:
     outFile.close();
     */
   }
+  private: 
+  StringRef OutFilename;
 };
 
 int main(int argc, const char **argv) {
-  if (argc < 2) {
-    std::cerr << "Expected path to input OpenCilk (C++) file." << std::endl;
+  if (argc < 3) {
+    std::cerr << "Expected path to input OpenCilk (C++) file and output file." << std::endl;
     return 1;
   }
 
@@ -130,7 +136,7 @@ int main(int argc, const char **argv) {
       new clang::FileManager(FSOpts));
 
   clang::tooling::ToolInvocation invocation(
-      compilationFlags, std::make_unique<CilkConvertAction>(), Files.get(),
+      compilationFlags, std::make_unique<CilkConvertAction>(argv[2]), Files.get(),
       PCHContainerOps);
 
   return !invocation.run();

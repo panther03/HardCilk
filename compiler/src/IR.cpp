@@ -30,7 +30,7 @@ void IRBasicBlock::iteratePreds(std::function<void(IRBasicBlock *B)> CB) {
 
 void IRBasicBlock::clone(IRBasicBlock *Dest) {
   for (auto &Stmt : Stmts) {
-    Dest->pushStmt(new IRStmt(Stmt.get()->innerStmt, Stmt.get()->Lhs));
+    Dest->pushStmtBack(new IRStmt(Stmt.get()->innerStmt, Stmt.get()->Lhs));
   }
   if (Terminator != nullptr) {
     Dest->Terminator = std::make_unique<IRStmt>(Terminator.get()->innerStmt);
@@ -61,6 +61,8 @@ void IRBasicBlock::print(llvm::raw_ostream &out, clang::ASTContext &Context,
     if (Stmt->Lhs) {
       out << Stmt->Lhs->getName() << " = ";
       j++;
+      I++;
+      continue;
     }
     if (Stmt->Kind == IRStmt::ForInc) {
       out << "ForInc" << NewlineSymbol;
