@@ -1,5 +1,7 @@
 #include "IR.hpp"
 #include "util.hpp"
+#include "clang/AST/Expr.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <clang/AST/ASTContext.h>
@@ -7,18 +9,244 @@
 #include <memory>
 #include <regex>
 
+
+void IRExprVisitor::Visit(IRExpr *E) {
+  Depth++;
+  switch (E->getKind()) {
+    case IRExpr::EXK_BINOP: VisitBinop(llvm::dyn_cast<BinopIRExpr>(E)); return;
+    case IRExpr::EXK_UNOP: VisitUnop(llvm::dyn_cast<UnopIRExpr>(E)); return;
+    case IRExpr::EXK_CALL: VisitCall(llvm::dyn_cast<CallIRExpr>(E)); return;
+    case IRExpr::EXK_ISPAWN: VisitISpawn(llvm::dyn_cast<ISpawnIRExpr>(E)); return;
+    case IRExpr::EXK_FIDENT: VisitFIdent(llvm::dyn_cast<FIdentIRExpr>(E)); return;
+    case IRExpr::EXK_REF: VisitRef(llvm::dyn_cast<RefIRExpr>(E)); return;
+    case IRExpr::EXK_LITERAL: VisitLiteral(llvm::dyn_cast<LiteralIRExpr>(E)); return;
+    case IRExpr::EXK_LVAL_IDENT: VisitIdent(llvm::dyn_cast<IdentIRExpr>(E)); return;
+    case IRExpr::EXK_LVAL_ACCESS: VisitAccess(llvm::dyn_cast<AccessIRExpr>(E)); return;
+    case IRExpr::EXK_LVAL_DREF: VisitDRef(llvm::dyn_cast<DRefIRExpr>(E)); return;
+    case IRExpr::EXK_LVAL_INDEX: VisitIndex(llvm::dyn_cast<IndexIRExpr>(E)); return;    
+    default: PANIC("impossible expr");
+  }
+}
+
+/////////////
+// IRExpr //
+///////////
+
+void IndexIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Ind);
+  Out << "&(" << Arr->Name << "[";
+  Ind->print(Out, Ctx);
+  Out << "])";
+}
+
+void RefIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(E);
+  Out << "&(";
+  E->print(Out, Ctx);
+  Out << ")";
+}
+
+void DRefIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Expr);
+  Out << "*(";
+  Expr->print(Out, Ctx);
+  Out << ")";
+}
+
+void AccessIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Struct);
+  Out << Struct->Name;
+  if (Arrow) {
+    Out << "->";
+  } else {
+    Out << ".";
+  }
+  Out << Field;
+}
+
+void IdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Ident);
+  Out << Ident->Name;
+}
+
+void FIdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  if (auto *F = std::get_if<IRFunction *>(&FR)) {
+    Out << (*F)->getName();
+  } else {
+    Out << std::get<ASTVarRef>(FR)->getName();
+  }
+}
+
+void LiteralIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Lit);
+  Lit->printPretty(Out, nullptr, Ctx.ASTCtx.getPrintingPolicy());
+}
+
+void BinopIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Left && Right);
+  Out << "(";
+  Left->print(Out, Ctx);
+  Out << " ";
+  printBinop(Out);
+  Out << " ";
+  Right->print(Out, Ctx);
+  Out << ")";
+}
+
+void UnopIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Expr);
+  Out << "(";
+  const char *Op;
+  if (printUnop(Op)) {
+    Expr->print(Out, Ctx);
+    Out << Op;
+  } else { 
+    Out << Op;
+    Expr->print(Out, Ctx);
+  }
+  Out << ")";
+}
+
+void ISpawnIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  Out << "spawn ";
+  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
+    Out << (*F)->getName();
+  } else {
+    Out << std::get<ASTVarRef>(Fn)->getName();
+  }
+  Out << "(";
+  bool first = true;
+  for (auto &Arg : Args) {
+    if (first) {
+      first = false;
+    } else {
+      Out << ",";
+    }
+    Arg->print(Out, Ctx);
+  }
+  Out << ")";
+}
+
+void CallIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
+    Out << (*F)->getName();
+  } else {
+    Out << std::get<ASTVarRef>(Fn)->getName();
+  }
+  Out << "(";
+  bool first = true;
+  for (auto &Arg : Args) {
+    if (first) {
+      first = false;
+    } else {
+      Out << ",";
+    }
+    Arg->print(Out, Ctx);
+  }
+  Out << ")";
+}
+
 /////////////
 // IRStmt //
 ///////////
-void IRStmt::printAllIdentifiers() {
-  for (auto it = ExprIdentifierIterator(innerStmt); !it.done(); ++it) {
-    llvm::outs() << (*it)->getNameInfo().getAsString() << "\n";
+void LoopIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  if (Inc || Init) {
+    Out << "for (";
+  } else {
+    Out << "while (";
+  }
+
+  if (Init) {
+    Init->print(Out, Ctx);
+  }
+  Out << ";";
+  Cond->print(Out, Ctx);
+  Out << ";";
+  if (Inc) {
+    Inc->print(Out, Ctx);
   }
 }
+
+void IfIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Cond);
+  Out << "if (";
+    Cond->print(Out, Ctx);
+  Out << ")";
+}
+
+void SpawnNextIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Fn);
+  Out << "spawnNext ";
+  Out << Fn->getName();
+}
+
+void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Dest);
+  Out << "spawn ";
+  Dest->print(Out, Ctx);
+  Out << " ";
+  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
+    Out << (*F)->getName();
+  } else {
+    Out << std::get<ASTVarRef>(Fn)->getName();
+  }
+  bool first = true;
+  for (auto &Arg : Args) {
+    if (first) {
+      first = false;
+    } else {
+      Out << ",";
+    }
+    Arg->print(Out, Ctx);
+  }
+  Out << ";";
+}
+
+void ExprWrapIRStmt ::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Expr);
+  Expr->print(Out, Ctx);
+  Out << ";";
+}
+
+void StoreIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Dest);
+  Dest->print(Out, Ctx);
+  Out << " = ";
+  Src->print(Out, Ctx);
+  Out << ";";
+}
+
+void CopyIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  assert(Dest);
+  Out << Dest->Name << " = ";
+  Src->print(Out, Ctx);
+  Out << ";";
+}
+
+void SyncIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  Out << "sync;";
+}
+
+void ReturnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+  Out << "return ";
+  if (RetVal) {
+    RetVal->print(Out, Ctx);
+  }
+  Out << ";";
+}
+
+void ScopeAnnotIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {}
+
+//void IRStmt::printAllIdentifiers() {
+//  for (auto it = ExprIdentifierIterator(innerStmt); !it.done(); ++it) {
+//    llvm::outs() << (*it)->getNameInfo().getAsString() << "\n";
+//  }
+//}
 
 ///////////////////
 // IRBasicBlock //
 /////////////////
+/*
 void IRBasicBlock::iteratePreds(std::function<void(IRBasicBlock *B)> CB) {
   for (auto &B : *Parent) {
     auto &BSuccs = (B.get())->Succs;
@@ -121,6 +349,7 @@ void IRBasicBlock::dumpGraph(llvm::raw_ostream &out,
 /////////////////
 // IRFunction //
 ///////////////
+*/
 
 IRBasicBlock *IRFunction::createBlock() {
   IRBlockPtr B = std::make_unique<IRBasicBlock>(Blocks.size(), this);
@@ -129,6 +358,26 @@ IRBasicBlock *IRFunction::createBlock() {
   return Bp;
 }
 
+/*
+void IRFunction::moveBlock(IRBasicBlock *B, IRFunction *Dest) {
+  IRFunction::iterator BlockIt = begin();
+  std::advance(BlockIt, B->getInd());
+  IRBlockPtr OwnedB = std::move(*BlockIt);
+  Blocks.erase(BlockIt);
+  int I = 0;
+  for (auto &MyB : Blocks) {
+    MyB->Ind = I;
+    I++;
+  }
+  B->Ind = Dest->Blocks.size();
+  if (B->Ind == 0) {
+    Dest->Entry = B;
+  }
+  Dest->Blocks.push_back(std::move(OwnedB));
+  B->Parent = Dest;
+} */
+
+/*
 void IRFunction::print(llvm::raw_ostream &out, clang::ASTContext &Context) {
   int i = 0;
   for (auto &B : Blocks) {
@@ -207,24 +456,7 @@ void IRFunction::dumpArgs(llvm::raw_ostream &out) {
   }
   out << "\n";
 }
-
-void IRFunction::moveBlock(IRBasicBlock *B, IRFunction *Dest) {
-  IRFunction::iterator BlockIt = begin();
-  std::advance(BlockIt, B->getInd());
-  IRBlockPtr OwnedB = std::move(*BlockIt);
-  Blocks.erase(BlockIt);
-  int I = 0;
-  for (auto &MyB : Blocks) {
-    MyB->Ind = I;
-    I++;
-  }
-  B->Ind = Dest->Blocks.size();
-  if (B->Ind == 0) {
-    Dest->Entry = B;
-  }
-  Dest->Blocks.push_back(std::move(OwnedB));
-  B->Parent = Dest;
-}
+*/
 
 ////////////////
 // IRPRogram //
@@ -236,6 +468,7 @@ IRFunction *IRProgram::createFunc() {
   Funcs.push_back(std::move(F));
   return Fp;
 }
+/*
 
 void IRProgram::print(llvm::raw_ostream &out, clang::ASTContext &Context) {
   for (auto &F : Funcs) {
@@ -298,6 +531,7 @@ IRBasicBlock* FindJoin(IRBasicBlock* Left, IRBasicBlock *Right) {
   }
   return nullptr;
 }
+
 
 void ScopedIRTraverser::traverse(IRFunction &F) {
   WorkList.push_back(WorkItem(F.entry()));
@@ -365,4 +599,4 @@ void ScopedIRTraverser::traverse(IRFunction &F) {
       handleScope(W.SE);
     }
   }
-}
+}*/

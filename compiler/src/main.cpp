@@ -8,11 +8,12 @@
 #include <iostream>
 
 
-#include "Cilk1EmuTarget.hpp"
+//#include "Cilk1EmuTarget.hpp"
+//#include "OpenCilk2IR.hpp"
+//#include "MakeExplicit.hpp"
+//#include "util.hpp"
+#include "OpenCilk2NewIR.hpp"
 #include "IR.hpp"
-#include "OpenCilk2IR.hpp"
-#include "MakeExplicit.hpp"
-#include "util.hpp"
 
 using namespace clang;
 using namespace clang::tooling;
@@ -35,6 +36,31 @@ public:
     std::error_code EC;
     auto &SM = CI.getSourceManager();
 
+    IRPrintContext Ctx = IRPrintContext {
+      .ASTCtx = Context,
+      .NewlineSymbol = "\n"
+    };
+    OpenCilk2NewIR(P, &Context, SM, Sentinel);
+    for (auto &F : P) {
+      for (auto &B: *F.get()) {
+        llvm::outs() << "Block " << B->getInd() << "\n";
+        int i = 0;
+        for (auto &S: *B.get()) {
+          llvm::outs() << "   " << i << ": ";
+          S->print(llvm::outs(), Ctx);
+          llvm::outs() << "\n";
+          i++;
+        }
+        if (B->Term) {
+          llvm::outs() << "   T: ";
+          B->Term->print(llvm::outs(), Ctx);
+          llvm::outs() << "\n";
+        }
+
+        llvm::outs() << "\n";
+      }
+    }
+/*
     OpenCilk2IR(P, &Context, SM, Sentinel);
 
     {
@@ -57,6 +83,7 @@ public:
 
     llvm::raw_fd_ostream Cilk1Out(OutFilename, EC, llvm::sys::fs::OF_Text);
     PrintCilk1Emu(P, Cilk1Out, Context, CI);
+*/
   }
 };
 

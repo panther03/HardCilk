@@ -5,7 +5,7 @@ long fib(long n) {
   long *p;
   if (n < 2) {
     w = n;
-    *p = (long)&w + w;
+    //*p = (long)&w + w;
     p[3] = w;
     p = &w;
     long z = *p;

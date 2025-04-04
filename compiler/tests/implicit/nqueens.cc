@@ -59,13 +59,6 @@ int ok (int n, char *a) {
   return 1;
 }
 
-class DumbThing {
-  public: 
-  ~DumbThing() {
-    printf("hi man :D \n");
-  }
-};
-
 int nqueens (int n, int j, char *a) {
   char *b;
   int i;
