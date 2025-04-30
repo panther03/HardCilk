@@ -1,32 +1,15 @@
 #include "IR.hpp"
 #include "util.hpp"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <clang/AST/ASTContext.h>
 #include <clang/AST/StmtCilk.h>
 #include <memory>
 #include <regex>
-
-
-void IRExprVisitor::Visit(IRExpr *E) {
-  Depth++;
-  switch (E->getKind()) {
-    case IRExpr::EXK_BINOP: VisitBinop(llvm::dyn_cast<BinopIRExpr>(E)); return;
-    case IRExpr::EXK_UNOP: VisitUnop(llvm::dyn_cast<UnopIRExpr>(E)); return;
-    case IRExpr::EXK_CALL: VisitCall(llvm::dyn_cast<CallIRExpr>(E)); return;
-    case IRExpr::EXK_ISPAWN: VisitISpawn(llvm::dyn_cast<ISpawnIRExpr>(E)); return;
-    case IRExpr::EXK_FIDENT: VisitFIdent(llvm::dyn_cast<FIdentIRExpr>(E)); return;
-    case IRExpr::EXK_REF: VisitRef(llvm::dyn_cast<RefIRExpr>(E)); return;
-    case IRExpr::EXK_LITERAL: VisitLiteral(llvm::dyn_cast<LiteralIRExpr>(E)); return;
-    case IRExpr::EXK_LVAL_IDENT: VisitIdent(llvm::dyn_cast<IdentIRExpr>(E)); return;
-    case IRExpr::EXK_LVAL_ACCESS: VisitAccess(llvm::dyn_cast<AccessIRExpr>(E)); return;
-    case IRExpr::EXK_LVAL_DREF: VisitDRef(llvm::dyn_cast<DRefIRExpr>(E)); return;
-    case IRExpr::EXK_LVAL_INDEX: VisitIndex(llvm::dyn_cast<IndexIRExpr>(E)); return;    
-    default: PANIC("impossible expr");
-  }
-}
 
 /////////////
 // IRExpr //
@@ -39,21 +22,39 @@ void IndexIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   Out << "])";
 }
 
-void RefIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* IndexIRExpr::clone() {
+  assert(Ind);
+  IRExpr *NewInd = Ind->clone();
+  return new IndexIRExpr(Arr, NewInd);
+}
+
+void RefIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(E);
   Out << "&(";
   E->print(Out, Ctx);
   Out << ")";
 }
 
-void DRefIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* RefIRExpr::clone() {
+  assert(E);
+  IRExpr *NewE = E->clone();
+  return new RefIRExpr(NewE);
+}
+
+void DRefIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Expr);
   Out << "*(";
   Expr->print(Out, Ctx);
   Out << ")";
 }
 
-void AccessIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* DRefIRExpr::clone() {
+  assert(Expr);
+  IRExpr *NewE = Expr->clone();
+  return new DRefIRExpr(NewE);
+}
+
+void AccessIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Struct);
   Out << Struct->Name;
   if (Arrow) {
@@ -64,12 +65,22 @@ void AccessIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   Out << Field;
 }
 
-void IdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* AccessIRExpr::clone() {
+  assert(Struct);
+  return new AccessIRExpr(Struct, Field);
+}
+
+void IdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Ident);
   Out << Ident->Name;
 }
 
-void FIdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* IdentIRExpr::clone() {
+  assert(Ident);
+  return new IdentIRExpr(Ident);
+}
+
+void FIdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   if (auto *F = std::get_if<IRFunction *>(&FR)) {
     Out << (*F)->getName();
   } else {
@@ -77,23 +88,55 @@ void FIdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   }
 }
 
-void LiteralIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
-  assert(Lit);
-  Lit->printPretty(Out, nullptr, Ctx.ASTCtx.getPrintingPolicy());
+IRExpr* FIdentIRExpr::clone() {
+  if (auto *F = std::get_if<IRFunction *>(&FR)) {
+    return new FIdentIRExpr(*F);
+  } else {
+    return new FIdentIRExpr(std::get<ASTVarRef>(FR));
+  }
 }
 
-void BinopIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+void LiteralIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
+  assert(Lit);
+  std::string LitS;
+  llvm::raw_string_ostream LitOS(LitS);
+
+  Lit->printPretty(LitOS, nullptr, Ctx.ASTCtx.getPrintingPolicy());
+  std::regex re("(\")");
+  LitS = std::regex_replace(LitS, re, "\\$1");
+  Out << LitS;
+}
+
+IRExpr* LiteralIRExpr::clone() {
+  assert(Lit);
+  return new LiteralIRExpr(Lit);
+}
+
+void BinopIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Left && Right);
   Out << "(";
   Left->print(Out, Ctx);
   Out << " ";
-  printBinop(Out);
+  if (Ctx.GraphVizEscapeChars && Op == BINOP_GT) {
+    Out << "\\>";
+  } else if (Ctx.GraphVizEscapeChars && Op == BINOP_LT) {
+    Out << "\\<";
+  } else {
+    printBinop(Out);
+  }
   Out << " ";
   Right->print(Out, Ctx);
   Out << ")";
 }
 
-void UnopIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* BinopIRExpr::clone() {
+  assert(Left && Right);
+  IRExpr *NewLeft = Left->clone();
+  IRExpr *NewRight = Right->clone();
+  return new BinopIRExpr(Op, NewLeft, NewRight);
+}
+
+void UnopIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Expr);
   Out << "(";
   const char *Op;
@@ -107,7 +150,13 @@ void UnopIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   Out << ")";
 }
 
-void ISpawnIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* UnopIRExpr::clone() {
+  assert(Expr);
+  IRExpr *NewE = Expr->clone();
+  return new UnopIRExpr(Op, NewE);
+}
+
+void ISpawnIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   Out << "spawn ";
   if (auto *F = std::get_if<IRFunction *>(&Fn)) {
     Out << (*F)->getName();
@@ -127,7 +176,19 @@ void ISpawnIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   Out << ")";
 }
 
-void CallIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRExpr* ISpawnIRExpr::clone() {
+  std::vector<IRExpr *> NewArgs;
+  for (auto &Arg : Args) {
+    NewArgs.push_back(Arg->clone());
+  }
+  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
+    return new ISpawnIRExpr(*F, NewArgs);
+  } else {
+    return new ISpawnIRExpr(std::get<ASTVarRef>(Fn), NewArgs);
+  }
+}
+
+void CallIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   if (auto *F = std::get_if<IRFunction *>(&Fn)) {
     Out << (*F)->getName();
   } else {
@@ -146,10 +207,22 @@ void CallIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   Out << ")";
 }
 
+IRExpr* CallIRExpr::clone() {
+  std::vector<IRExpr *> NewArgs;
+  for (auto &Arg : Args) {
+    NewArgs.push_back(Arg->clone());
+  }
+  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
+    return new CallIRExpr(*F, NewArgs);
+  } else {
+    return new CallIRExpr(std::get<ASTVarRef>(Fn), NewArgs);
+  }
+}
+
 /////////////
 // IRStmt //
 ///////////
-void LoopIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+void LoopIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   if (Inc || Init) {
     Out << "for (";
   } else {
@@ -165,22 +238,42 @@ void LoopIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   if (Inc) {
     Inc->print(Out, Ctx);
   }
+  Out << ")";
 }
 
-void IfIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRStmt* LoopIRStmt::clone() {
+  assert(Cond);
+  IRExpr *NewCond = Cond->clone();
+  IRStmt *NewInc = Inc ? Inc->clone() : nullptr;
+  IRStmt *NewInit = Init ? Init->clone() : nullptr;
+  return new LoopIRStmt(NewCond, NewInc, NewInit);
+}
+
+void IfIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Cond);
   Out << "if (";
     Cond->print(Out, Ctx);
   Out << ")";
 }
 
-void SpawnNextIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRStmt* IfIRStmt::clone() {
+  assert(Cond);
+  IRExpr *NewCond = Cond->clone();
+  return new IfIRStmt(NewCond);
+}
+
+void SpawnNextIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Fn);
   Out << "spawnNext ";
   Out << Fn->getName();
 }
 
-void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRStmt* SpawnNextIRStmt::clone() {
+  assert(Fn);
+  return new SpawnNextIRStmt(Fn);
+}
+
+void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Dest);
   Out << "spawn ";
   Dest->print(Out, Ctx);
@@ -199,43 +292,82 @@ void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
     }
     Arg->print(Out, Ctx);
   }
-  Out << ";";
 }
 
-void ExprWrapIRStmt ::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRStmt* ESpawnIRStmt::clone() {
+  std::vector<IRExpr *> NewArgs;
+  for (auto &Arg : Args) {
+    NewArgs.push_back(Arg->clone());
+  }
+  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
+    return new ESpawnIRStmt(dyn_cast<IRLvalExpr>(Dest->clone()), *F, NewArgs);
+  } else {
+    return new ESpawnIRStmt(dyn_cast<IRLvalExpr>(Dest->clone()), std::get<ASTVarRef>(Fn), NewArgs);
+  }
+}
+
+void ExprWrapIRStmt ::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Expr);
   Expr->print(Out, Ctx);
-  Out << ";";
 }
 
-void StoreIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRStmt* ExprWrapIRStmt::clone() {
+  assert(Expr);
+  return new ExprWrapIRStmt(Expr->clone());
+}
+
+void StoreIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Dest);
   Dest->print(Out, Ctx);
   Out << " = ";
   Src->print(Out, Ctx);
-  Out << ";";
 }
 
-void CopyIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+IRStmt* StoreIRStmt::clone() {
+  assert(Dest && Src);
+  IRLvalExpr *NewDest = dyn_cast<IRLvalExpr>(Dest->clone());
+  IRExpr *NewSrc = Src->clone();
+  return new StoreIRStmt(NewDest, NewSrc);
+}
+
+void CopyIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Dest);
   Out << Dest->Name << " = ";
   Src->print(Out, Ctx);
-  Out << ";";
 }
 
-void SyncIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
-  Out << "sync;";
+IRStmt* CopyIRStmt::clone() {
+  assert(Dest && Src);
+  IRExpr *NewSrc = Src->clone();
+  return new CopyIRStmt(Dest, NewSrc);
 }
 
-void ReturnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
+void SyncIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
+  Out << "sync";
+}
+
+IRStmt* SyncIRStmt::clone() {
+  return new SyncIRStmt();
+}
+
+void ReturnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   Out << "return ";
   if (RetVal) {
     RetVal->print(Out, Ctx);
   }
-  Out << ";";
 }
 
-void ScopeAnnotIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {}
+IRStmt* ReturnIRStmt::clone() {
+  assert(RetVal);
+  IRExpr *NewRetVal = RetVal->clone();
+  return new ReturnIRStmt(NewRetVal);
+}
+
+void ScopeAnnotIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){}
+
+IRStmt* ScopeAnnotIRStmt::clone() {
+  return new ScopeAnnotIRStmt(SA);
+}
 
 //void IRStmt::printAllIdentifiers() {
 //  for (auto it = ExprIdentifierIterator(innerStmt); !it.done(); ++it) {
@@ -246,7 +378,7 @@ void ScopeAnnotIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {}
 ///////////////////
 // IRBasicBlock //
 /////////////////
-/*
+
 void IRBasicBlock::iteratePreds(std::function<void(IRBasicBlock *B)> CB) {
   for (auto &B : *Parent) {
     auto &BSuccs = (B.get())->Succs;
@@ -258,98 +390,47 @@ void IRBasicBlock::iteratePreds(std::function<void(IRBasicBlock *B)> CB) {
 
 void IRBasicBlock::clone(IRBasicBlock *Dest) {
   for (auto &Stmt : Stmts) {
-    Dest->pushStmtBack(new IRStmt(Stmt.get()->innerStmt, Stmt.get()->Lhs));
+    Dest->pushStmtBack(Stmt->clone());
   }
-  if (Terminator != nullptr) {
-    Dest->Terminator = std::make_unique<IRStmt>(Terminator.get()->innerStmt);
+  if (Term != nullptr) {
+    Dest->Term = dyn_cast<IRTerminatorStmt>(Term->clone());
   }
 }
 
-void IRBasicBlock::graphPrintStmt(llvm::raw_ostream &out,
-                                  clang::ASTContext &Context, const Stmt *S,
-                                  const char *NewlineSymbol) {
-  llvm::SmallString<256> MsgBuffer;
-  llvm::raw_svector_ostream Msg(MsgBuffer);
-
-  S->printPretty(Msg, nullptr, Context.getPrintingPolicy(), 0U, NewlineSymbol);
-
-  // uhhhhhh
-  // yyea
-  auto s = std::regex_replace(MsgBuffer.str().str(), std::regex("<"), "\\<");
-  // s = std::regex_replace(s, std::regex(">"), "\\>");
-  out << s;
-}
-
-void IRBasicBlock::print(llvm::raw_ostream &out, clang::ASTContext &Context,
-                         const char *NewlineSymbol) {
+void IRBasicBlock::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   int I = 1;
   int j = 0;
   for (auto &Stmt : Stmts) {
-    out << "   " << I << ": ";
-    if (Stmt->Lhs) {
-      out << Stmt->Lhs->getName() << " = ";
-      j++;
-      I++;
-      continue;
-    }
-    if (Stmt->Kind == IRStmt::ForInc) {
-      out << "ForInc" << NewlineSymbol;
-    } else if (Stmt->Kind == IRStmt::ForInit) {
-      out << "ForInit" << NewlineSymbol;
-    } else if (Stmt->Kind == IRStmt::SpawnNextDecl) {
-      assert(Stmt->SpawnNextDest);
-      out << "spawnNextDecl fn" << Stmt->SpawnNextDest->Ind
-          << NewlineSymbol;
-    } else {
-      graphPrintStmt(out, Context, Stmt->innerStmt, NewlineSymbol);
-      if (isa<Expr>(Stmt->innerStmt))
-        out << ";" << NewlineSymbol;
-    }
+    Out << "   " << I << ": ";
+    Stmt->print(Out, Ctx);
+    Out << Ctx.NewlineSymbol;
 
     I++;
   }
-  if (Terminator != nullptr) {
-    const Stmt *S = Terminator->innerStmt;
-    if (auto *IS = dyn_cast<IfStmt>(S)) {
-      out << "   T: if (";
-      graphPrintStmt(out, Context, IS->getCond(), NewlineSymbol);
-      out << ")" << NewlineSymbol;
-    } else if (auto *FS = dyn_cast<ForStmt>(S)) {
-      out << "   T : for (";
-      graphPrintStmt(out, Context, FS->getInit(), "");
-      out << "; ";
-      graphPrintStmt(out, Context, FS->getCond(), "");
-      out << "; ";
-      graphPrintStmt(out, Context, FS->getInc(), "");
-      out << ")" << NewlineSymbol;
-    } else if (auto *RS = dyn_cast<ReturnStmt>(S)) {
-      out << "   T: return ";
-      graphPrintStmt(out, Context, RS->getRetValue(), NewlineSymbol);
-      out << NewlineSymbol;
-    } else if (isa<CilkSyncStmt>(S)) {
-      if (Terminator->Kind == IRStmt::SpawnNext) {
-        assert(Terminator->SpawnNextDest);
-        out << "   T: spawnNext fn" << Terminator->SpawnNextDest->Ind
-            << NewlineSymbol;
-      } else {
-        out << "   T: sync" << NewlineSymbol;
-      }
-    }
+  if (Term) { 
+    Out << "   T: ";
+    Term->print(Out, Ctx);
+    Out << Ctx.NewlineSymbol;
   }
 }
 
-void IRBasicBlock::dumpGraph(llvm::raw_ostream &out,
+void IRBasicBlock::dumpGraph(llvm::raw_ostream &Out,
                              clang::ASTContext &Context) {
-  out << "\"{ [B" << getInd();
-  out << "]\\l";
-  print(out, Context, "\\l");
-  out << "}\"";
+  Out << "\"{ [B" << getInd();
+  Out << "]\\l";
+  IRPrintContext Ctx = IRPrintContext {
+    .ASTCtx = Context,
+    .NewlineSymbol = "\\l",
+    .GraphVizEscapeChars = true
+  };
+  print(Out, Ctx);
+  Out << "}\"";
 }
 
 /////////////////
 // IRFunction //
 ///////////////
-*/
+
 
 IRBasicBlock *IRFunction::createBlock() {
   IRBlockPtr B = std::make_unique<IRBasicBlock>(Blocks.size(), this);
@@ -358,7 +439,6 @@ IRBasicBlock *IRFunction::createBlock() {
   return Bp;
 }
 
-/*
 void IRFunction::moveBlock(IRBasicBlock *B, IRFunction *Dest) {
   IRFunction::iterator BlockIt = begin();
   std::advance(BlockIt, B->getInd());
@@ -370,14 +450,39 @@ void IRFunction::moveBlock(IRBasicBlock *B, IRFunction *Dest) {
     I++;
   }
   B->Ind = Dest->Blocks.size();
-  if (B->Ind == 0) {
-    Dest->Entry = B;
-  }
   Dest->Blocks.push_back(std::move(OwnedB));
   B->Parent = Dest;
-} */
+}
 
-/*
+void IRFunction::cleanVars() {
+  std::set<IRVarRef> accessed;
+
+  for (auto &B: *this) {
+    for (auto &S: *B) {
+      for (auto *D: ExprIdentifierVisitor(S.get())) {
+        accessed.insert(D);
+      }
+      if (auto *CS = dyn_cast<CopyIRStmt>(S.get())) {
+        accessed.insert(CS->Dest);
+      }
+    }
+  }
+
+  auto it = Vars.begin();
+  while (it != Vars.end()) {
+    auto *VR = &(*it);
+    if (accessed.find(VR) == accessed.end()) {
+      // Remove variable declaration
+      auto itc = it;
+      it++;
+      Vars.erase(itc);
+    } else {
+      it++;
+    }
+  }
+}
+
+
 void IRFunction::print(llvm::raw_ostream &out, clang::ASTContext &Context) {
   int i = 0;
   for (auto &B : Blocks) {
@@ -386,7 +491,11 @@ void IRFunction::print(llvm::raw_ostream &out, clang::ASTContext &Context) {
     B->iteratePreds(
         [&](IRBasicBlock *Pred) -> void { out << Pred->getInd() << " "; });
     out << "\n";
-    B->print(out, Context, "\n");
+    IRPrintContext Ctx = IRPrintContext {
+      .ASTCtx = Context,
+      .NewlineSymbol = "\n"
+    };
+    B->print(out, Ctx);
     out << "SUCCS: ";
     for (auto *Succ : B->Succs) {
       out << Succ->getInd() << " ";
@@ -408,8 +517,10 @@ void IRFunction::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
     auto *BB = B.get();
     out << "    Node" << Ind << "_" << BB->getInd();
     out << " [shape=record,";
-    if (B.get() == Entry) {
+    if (BB->Ind == 0) {
       out << "fontcolor=\"blue\",color=\"blue\",";
+    } else if (BB == BB->Parent->Exit) {
+      out << "fontcolor=\"green\",color=\"green\",";
     }
     out << "label=";
     BB->dumpGraph(out, Context);
@@ -422,6 +533,7 @@ void IRFunction::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
       out << " -> Node" << Ind << "_" << Succ->getInd();
       out << ";\n";
     }
+    /*
     const IRBasicBlock *HasSpawnToSpawnNext = nullptr;
     for (auto &S : *B) {
       if ((Spawn2SpawnNext.find(S.get()) != Spawn2SpawnNext.end())) {
@@ -434,11 +546,12 @@ void IRFunction::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
       out << "\" -> \"Node" << Ind << "_" << HasSpawnToSpawnNext->getInd()
           << "\"";
       out << "  [style=\"dashed\" color=\"green\"];\n";
-    }
+    }*/
   }
   out << "}\n";
 }
 
+/*
 void IRFunction::dumpArgs(llvm::raw_ostream &out) {
   out << "\tArgs: ";
   for (auto *v : Args) {
@@ -455,8 +568,7 @@ void IRFunction::dumpArgs(llvm::raw_ostream &out) {
     }
   }
   out << "\n";
-}
-*/
+}*/
 
 ////////////////
 // IRPRogram //
@@ -468,7 +580,7 @@ IRFunction *IRProgram::createFunc() {
   Funcs.push_back(std::move(F));
   return Fp;
 }
-/*
+
 
 void IRProgram::print(llvm::raw_ostream &out, clang::ASTContext &Context) {
   for (auto &F : Funcs) {
@@ -481,16 +593,17 @@ void IRProgram::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
   for (auto &F : Funcs) {
     F->dumpGraph(out, Context);
   }
-  for (auto &F : Funcs) {
-    for (const auto &[B, SnD] : F->SpawnNext2Cont) {
-      out << "    \"Node" << F->Ind << "_" << B->getInd();
-      out << "\" -> \"Node" << SnD->Ind << "_" << 0 << "\"";
-      out << "  [style=\"dashed\" color=\"red\" lhead=clusterfn";
-      out << SnD->Ind << "];\n";
-    }
-  }
+  //for (auto &F : Funcs) {
+  //  for (const auto &[B, SnD] : F->SpawnNext2Cont) {
+  //    out << "    \"Node" << F->Ind << "_" << B->getInd();
+  //    out << "\" -> \"Node" << SnD->Ind << "_" << 0 << "\"";
+  //    out << "  [style=\"dashed\" color=\"red\" lhead=clusterfn";
+  //    out << SnD->Ind << "];\n";
+  //  }
+  //}
   out << "}\n";
 }
+/*
 
 ////////////////////////
 // ScopedIRTraverser //

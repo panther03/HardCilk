@@ -15,13 +15,18 @@ using namespace llvm;
 ///////////////////////////
 
 struct CreateContinuationFuns {
+  struct ContFun {
+    IRFunction *F;
+    std::set<IRVarRef> Args;
+    std::set<IRVarRef> Locals;
+  };
   // Each "path" in this vector will become a function.
   // The first path corresponds to the original function.
   // Note that the sets need to be ordered to preserve DFS order,
   // allowing us to compute the values actually needed by the path
   std::vector<SetVector<IRBasicBlock *>> Paths;
   std::unordered_map<IRBasicBlock *, int> PathLookup;
-  std::vector<IRFunction *> ContFuns;
+  std::vector<ContFun> ContFuns;
 
 private:
   IRBasicBlock *duplicateBasicBlock(IRBasicBlock *B,
@@ -66,7 +71,7 @@ private:
       Paths[CurrLevel].insert(B);
       PathLookup.insert(std::make_pair(B, CurrLevel));
 
-      if (B->Terminator && isa<CilkSyncStmt>(B->Terminator->innerStmt)) {
+      if (B->Term && isa<SyncIRStmt>(B->Term)) {
         // sync instruction should have only one successor
         IRBasicBlock *SISucc = *(B->Succs.begin());
         if (PathLookup.find(SISucc) != PathLookup.end()) {
@@ -96,11 +101,11 @@ private:
   // TODO: this function is not going to handle more complex cases like
   // a store being present in only one branch and a load at the join
   // (so the value is free for the whole function)
-  void analyzePath(const DeclContext *RootCtx, IRFunction *CF,
+  void analyzePath(ContFun &CF,
                    SetVector<IRBasicBlock *> &path,
                    std::set<IRVarRef> *inFrees) {
-    std::set<IRVarRef> &free = CF->Args;
-    std::set<IRVarRef> &refd = CF->Locals;
+    std::set<IRVarRef> &free = CF.Args;
+    std::set<IRVarRef> &refd = CF.Locals;
 
     // Values that will be used in the proceeding blocks regardless of whether
     // they are used here. Only removed if created here.
@@ -110,20 +115,20 @@ private:
       }
     }
     for (auto &bb : path) {
-      for (auto &I : *bb) {
-
-        for (auto it = ExprIdentifierIterator(I->innerStmt); !it.done(); ++it) {
-          IRVarRef D = (*it)->getDecl();
-          if (D && (D->getLexicalDeclContext() != RootCtx) &&
-              (refd.find(D) == refd.end())) {
+      for (auto &S : *bb) {
+        auto V = ExprIdentifierVisitor(S.get());
+        for (auto *D: V) {
+          if (refd.find(D) == refd.end()) {
             free.insert(D);
             refd.insert(D);
           }
         }
 
-        if (I->Lhs && refd.find(I->Lhs) == refd.end()) {
-          refd.insert(I->Lhs);
-          free.erase(I->Lhs);
+        if (auto *CS = dyn_cast<CopyIRStmt>(S.get())) {
+          if (refd.find(CS->Dest) == refd.end()) {
+            refd.insert(CS->Dest);
+            free.erase(CS->Dest);
+          }
         }
       }
     }
@@ -134,39 +139,8 @@ private:
     }
   }
 
-  void analyzeRoot(IRFunction &RootF) {
-    auto *ASTRootF = RootF.RootFun;
-    assert(ASTRootF);
-    for (auto *Param : ASTRootF->parameters()) {
-      RootF.Args.insert(Param);
-    }
-    auto &locals = RootF.Locals;
-
-    for (auto &bb : RootF) {
-      for (auto &I : *bb) {
-
-        for (auto it = ExprIdentifierIterator(I->innerStmt); !it.done(); ++it) {
-          IRVarRef D = (*it)->getDecl();
-          if (D && (D->getLexicalDeclContext() !=
-                    ASTRootF->getLexicalDeclContext())) {
-            locals.insert(D);
-          }
-        }
-
-        if (I->Lhs) {
-          locals.insert(I->Lhs);
-        }
-      }
-    }
-
-    for (auto *Arg : RootF.Args) {
-      RootF.Locals.erase(Arg);
-    }
-  }
-
 public:
   CreateContinuationFuns(IRFunction &F) {
-    assert(F.RootFun);
     createSyncPaths(F);
 
     if (Paths.size() == 1) {
@@ -188,9 +162,12 @@ public:
     }
 
     for (int p = 0; p < Paths.size() - 1; p++) {
-      IRFunction *ContF = F.getParent()->createFunc();
-      ContF->NeedsCont = true;
-      ContFuns.push_back(ContF);
+      ContFun CF = ContFun {
+        .F = F.getParent()->createFunc(),
+        .Args = std::set<IRVarRef>(),
+        .Locals = std::set<IRVarRef>()
+      };
+      ContFuns.push_back(CF);
     }
     // just used for checking assumptions
     std::vector<bool> visited(Paths.size() - 1, 0);
@@ -212,11 +189,11 @@ public:
       if (!bb->Succs.empty()) {
         if (auto *succBb = *(bb->Succs.begin())) {
           assert(PathLookup.find(succBb) != PathLookup.end());
-          inFrees = &(ContFuns[PathLookup[succBb] - 1]->Args);
+          inFrees = &(ContFuns[PathLookup[succBb] - 1].Args);
         }
       }
 
-      analyzePath(F.RootFun->getLexicalDeclContext(), ContFuns[path],
+      analyzePath(ContFuns[path],
                   Paths[path + 1], inFrees);
       visited[path] = true;
 
@@ -228,23 +205,40 @@ public:
 
     for (int p = 0; p < Paths.size(); p++) {
       auto &Path = Paths[p];
+
+      if (p > 0) { 
+        auto &CF = ContFuns[p-1];
+        for (auto *Arg: CF.Args) {
+          CF.F->Vars.push_back(IRVarDecl {
+            .Type = Arg->Type,
+            .Name = Arg->Name,
+            .DeclLoc = IRVarDecl::ARG
+          });
+        }
+        for (auto *Local: CF.Locals) {
+          CF.F->Vars.push_back(IRVarDecl {
+            .Type = Local->Type,
+            .Name = Local->Name,
+            .DeclLoc = IRVarDecl::LOCAL
+          });
+        }
+      }
+
       for (auto *B : Path) {
         IRFunction *SpawnNextDest = nullptr;
-        if (B->Terminator) {
-          if (isa<CilkSyncStmt>(B->Terminator->innerStmt)) {
+        if (B->Term) {
+          if (isa<SyncIRStmt>(B->Term)) {
             auto *succBb = *(B->Succs.begin());
             assert(succBb);
             assert(PathLookup.find(succBb) != PathLookup.end());
             assert(PathLookup[succBb] > 0);
-            B->Terminator->Kind = IRStmt::SpawnNext;
-            SpawnNextDest = ContFuns[PathLookup[succBb] - 1];
-            B->Terminator->SpawnNextDest = SpawnNextDest;
-
+            delete B->Term;
+            B->Term = new SpawnNextIRStmt(ContFuns[PathLookup[succBb] - 1].F);
             B->Succs.clear();
           }
         }
         if (p > 0) {
-          B->getParent()->moveBlock(B, ContFuns[p - 1]);
+          B->getParent()->moveBlock(B, ContFuns[p - 1].F);
         }
         if (SpawnNextDest) {
           B->getParent()->SpawnNext2Cont[B] = SpawnNextDest;
@@ -252,20 +246,21 @@ public:
       }
     }
 
-    analyzeRoot(F);
+    F.cleanVars();
 
     outs() << "Root:\n";
-    F.dumpArgs(outs());
+    F.printVars(outs());
 
     int I = 0;
     for (auto &CF : ContFuns) {
-      outs() << "ContF" << CF->getInd() << ":\n";
-      CF->dumpArgs(outs());
+      outs() << "ContF" << CF.F->getInd() << ":\n";
+      CF.F->printVars(outs());
       I++;
     }
   }
 };
 
+/*
 ///////////////////////
 // ScopeStartMapper //
 /////////////////////
@@ -435,7 +430,7 @@ struct SetupArgsLocals {
 /////////
 
 void MarkContFuns(IRFunction *F) {
-  // Mark functions that need continuations as requiring a continuation.
+  // Mark functions that need continuations as such.
   for (auto &B : *F) {
     for (auto &S : *B) {
       if (auto *SpawnE = dyn_cast<CilkSpawnExpr>(S->innerStmt)) {
@@ -450,7 +445,7 @@ void MarkContFuns(IRFunction *F) {
       }
     }
   }
-}
+}*/
 
 void MakeExplicit(IRProgram &P) {
   std::vector<IRFunction *> WorkList;
@@ -460,7 +455,7 @@ void MakeExplicit(IRProgram &P) {
 
   for (auto &F : WorkList) {
     CreateContinuationFuns CCF(*F);
-    SetupArgsLocals SAL(*F, CCF.ContFuns);
-    MarkContFuns(F);
+    //SetupArgsLocals SAL(*F, CCF.ContFuns);
+    //MarkContFuns(F);
   }
 }

@@ -10,9 +10,9 @@
 
 //#include "Cilk1EmuTarget.hpp"
 //#include "OpenCilk2IR.hpp"
-//#include "MakeExplicit.hpp"
+#include "MakeExplicit.hpp"
 //#include "util.hpp"
-#include "OpenCilk2NewIR.hpp"
+#include "OpenCilk2IR.hpp"
 #include "IR.hpp"
 
 using namespace clang;
@@ -40,25 +40,21 @@ public:
       .ASTCtx = Context,
       .NewlineSymbol = "\n"
     };
-    OpenCilk2NewIR(P, &Context, SM, Sentinel);
-    for (auto &F : P) {
-      for (auto &B: *F.get()) {
-        llvm::outs() << "Block " << B->getInd() << "\n";
-        int i = 0;
-        for (auto &S: *B.get()) {
-          llvm::outs() << "   " << i << ": ";
-          S->print(llvm::outs(), Ctx);
-          llvm::outs() << "\n";
-          i++;
-        }
-        if (B->Term) {
-          llvm::outs() << "   T: ";
-          B->Term->print(llvm::outs(), Ctx);
-          llvm::outs() << "\n";
-        }
-
-        llvm::outs() << "\n";
+    OpenCilk2IR(P, &Context, SM, Sentinel);
+    {
+      llvm::raw_fd_ostream DotFile("irbefore.dot", EC, llvm::sys::fs::OF_Text);
+      if (EC) {
+        PANIC("could not open file irbefore.dot");
       }
+      P.dumpGraph(DotFile, Context);
+    }
+    MakeExplicit(P);
+    {
+      llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
+      if (EC) {
+        PANIC("could not open file ir.dot");
+      }
+      P.dumpGraph(DotFile2, Context);
     }
 /*
     OpenCilk2IR(P, &Context, SM, Sentinel);
@@ -70,7 +66,7 @@ public:
       }
       P.dumpGraph(DotFile, Context);
     }
-    MakeExplicit(P);
+    
     {
       llvm::raw_fd_ostream DotFile2("ir.dot", EC, llvm::sys::fs::OF_Text);
       if (EC) {

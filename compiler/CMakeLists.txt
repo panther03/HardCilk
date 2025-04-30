@@ -41,9 +41,8 @@ include_directories("include")
 set(SOURCE_FILES
     src/main.cpp
     src/IR.cpp
-#    src/OpenCilk2IR.cpp
-    src/OpenCilk2NewIR.cpp
-#    src/MakeExplicit.cpp
+    src/OpenCilk2IR.cpp
+    src/MakeExplicit.cpp
 #    src/Cilk1EmuTarget.cpp
 )
 
