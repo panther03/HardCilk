@@ -33,11 +33,21 @@ struct IRPrintContext {
 };
 
 typedef const clang::Type *IRType;
+typedef int Sym;
+
+struct SymTable {
+  std::vector<std::string> Table;
+  std::unordered_map<std::string, size_t> DupCnt;
+};
+
+extern SymTable GSymTable;
+extern const std::string& GetSym(Sym S);
+extern Sym PutSym(std::string Name);
 
 // TODO: doesn't take into account scoping
 struct IRVarDecl {
   IRType Type;
-  std::string Name;
+  Sym Name;
   enum { LOCAL, EPHEMERAL, ARG } DeclLoc;
 };
 
@@ -93,7 +103,6 @@ public:
   }
 
   virtual void print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
-    printf("K: %d\n", getKind());
     assert(false && "IRLvalExpr::print should not be called");
   }
 };
@@ -380,6 +389,7 @@ public:
     STK_LOOP,
     STK_IF,
     STK_SPAWN_NEXT,
+    STK_CLOSURE_DECL,
     STK_RETURN,
     STK_SYNC,
     STK_TERMINATOR_END,
@@ -388,11 +398,10 @@ public:
     STK_STORE,
     STK_COPY,
     STK_SCOPE_ANNOT,
-    ForInc,
-    ForInit,
-    SpawnNext,
-    SpawnNextDecl,
-    VoidSpawn
+
+//    ForInc,
+//    ForInit,
+//    VoidSpawn
   };
 
 private:
@@ -412,6 +421,20 @@ public:
   }
 
   virtual ~IRStmt() = default;
+};
+
+struct ClosureDeclIRStmt : IRStmt {
+  IRFunction *Fn;
+  std::unordered_map<IRVarRef, IRVarRef> Caller2Callee;
+public:
+  ClosureDeclIRStmt(IRFunction *Fn) : Fn(Fn), IRStmt(STK_CLOSURE_DECL) {}
+
+  void addCallerToCaleeVarMapping(IRVarRef VR1, IRVarRef VR2) {
+    Caller2Callee[VR1] = VR2;
+  }
+
+  virtual void print(llvm::raw_ostream &Out, IRPrintContext &Ctx) override;
+  virtual IRStmt* clone() override;
 };
 
 struct IRTerminatorStmt : public IRStmt {
@@ -458,9 +481,14 @@ public:
 
 struct SpawnNextIRStmt : IRTerminatorStmt {
   IRFunction *Fn;
+  ClosureDeclIRStmt *Decl;
 
 public:
   SpawnNextIRStmt(IRFunction *Fn) : Fn(Fn), IRTerminatorStmt(STK_SPAWN_NEXT) {}
+
+  void setDecl(ClosureDeclIRStmt *InDecl) {
+    Decl = InDecl;
+  }
 
   static bool classof(const IRStmt *S) {
     return S->getKind() == IRStmt::STK_SPAWN_NEXT;
@@ -498,13 +526,14 @@ public:
 
 struct ESpawnIRStmt : IRStmt {
   std::unique_ptr<IRLvalExpr> Dest;
-  IRFunRef Fn;
+  SpawnNextIRStmt* SN;
   std::vector<std::unique_ptr<IRExpr>> Args;
+  bool Local;
 
 public:
-  ESpawnIRStmt(IRLvalExpr *Dest, IRFunRef Fn,
-               std::vector<IRExpr*> InArgs)
-      : Dest(Dest), Fn(Fn), IRStmt(STK_ESPAWN) {
+  ESpawnIRStmt(IRLvalExpr *Dest, SpawnNextIRStmt* SN,
+               std::vector<IRExpr*> InArgs, bool Local)
+      : Dest(Dest), SN(SN), IRStmt(STK_ESPAWN), Local(Local) {
         for (auto *Arg : InArgs) {
           Args.push_back(std::unique_ptr<IRExpr>(Arg));
         }
@@ -659,10 +688,6 @@ class IRExprVisitor {
           Visit(EWS->Expr.get());
           return;
         }
-        case IRStmt::STK_SYNC: {
-          SyncIRStmt *SS = llvm::dyn_cast<SyncIRStmt>(S);
-          return;
-        }
         case IRStmt::STK_IF: {
           IfIRStmt *IS = llvm::dyn_cast<IfIRStmt>(S);
           Visit(IS->Cond.get());
@@ -682,6 +707,10 @@ class IRExprVisitor {
         }
         case IRStmt::STK_SCOPE_ANNOT: {
           ScopeAnnotIRStmt *SAS = llvm::dyn_cast<ScopeAnnotIRStmt>(S);
+          return;
+        }
+        case IRStmt::STK_SYNC:
+        case IRStmt::STK_SPAWN_NEXT: {
           return;
         }
         default: PANIC("impossible stmt");
@@ -762,7 +791,7 @@ public:
   // std::unordered_map<const IRStmt *, IRBasicBlock *> Spawn2SpawnNext;
   std::unordered_map<const IRBasicBlock *, IRFunction *> SpawnNext2Cont;
 
-  IRFunction(unsigned Ind, IRProgram *Parent) : Parent(Parent), Ind(Ind) {}
+  IRFunction(unsigned Ind, const std::string &Name, IRProgram *Parent) : Parent(Parent), Ind(Ind), Name(Name) {}
   IRBasicBlock *createBlock();
 
   void printVars(llvm::raw_ostream &out) {
@@ -770,7 +799,7 @@ public:
       if (V.DeclLoc == IRVarDecl::ARG) {
         out << "[A]:";
       }
-      out << V.Name << " ";
+      out << GetSym(V.Name) << " ";
     }
     out << "\n";
   }
@@ -812,7 +841,7 @@ public:
   std::unordered_map<std::string, IRFunction *> RootFunLookup;
 
   IRProgram() {}
-  IRFunction *createFunc();
+  IRFunction *createFunc(const std::string &Name);
 
   void print(llvm::raw_ostream &out, clang::ASTContext &Context);
   void dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context);
@@ -830,7 +859,7 @@ public:
   const_iterator end() const { return Funcs.end(); }
 };
 
-/*
+
 class ScopedIRTraverser {
 protected:
   enum ScopeEvent { None, Open, Close, Else };
@@ -859,6 +888,7 @@ public:
   void traverse(IRFunction &F);
 };
 
+/*
 class ScopedIRPrinter : public ScopedIRTraverser {
 private:
   int indent = 0;
@@ -897,32 +927,30 @@ public:
 };*/
 
 class ExprIdentifierVisitor : public IRExprVisitor<ExprIdentifierVisitor> {
-private:
-  std::set<IRVarRef> Identifiers;
 public:
-  ExprIdentifierVisitor(IRStmt *S) {
+  using IdCallbackType = std::function<void(IRVarRef&, bool)>;
+private:
+  IdCallbackType CB;
+public:
+  
+  ExprIdentifierVisitor(IRStmt *S, IdCallbackType CB) : CB(CB) {
     VisitStmt(S);
   }
 
-  //void VisitStmt(IRStmt *S) {
-  //  if (auto CS = dyn_cast<CopyIRStmt>(S)) {
-  //    Identifiers.insert(CS->Dest);
-  //  }
-  //  IRExprVisitor<ExprIdentifierVisitor>::VisitStmt(S);
-  //}
+  void VisitStmt(IRStmt *S) {
+    if (auto CS = dyn_cast<CopyIRStmt>(S)) {
+      CB(CS->Dest, true);
+    }
+    IRExprVisitor<ExprIdentifierVisitor>::VisitStmt(S);
+  }
 
   void VisitIdent(IdentIRExpr *Node) {
-    Identifiers.insert(Node->Ident);
+    CB(Node->Ident, false);
   }
 
   void VisitAccess(AccessIRExpr *Node) {
-    Identifiers.insert(Node->Struct);
+    CB(Node->Struct, false);
   }
-
-  using iterator = decltype(Identifiers)::iterator;
-
-  iterator begin() { return Identifiers.begin(); }
-  iterator end() { return Identifiers.end(); }
 };
 /*
 struct ExprIdentifierIterator {

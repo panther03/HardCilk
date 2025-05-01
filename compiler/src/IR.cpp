@@ -11,13 +11,32 @@
 #include <memory>
 #include <regex>
 
+SymTable GSymTable;
+
+const std::string& GetSym(Sym S) {
+  return GSymTable.Table[S];
+}
+
+Sym PutSym(std::string Name) {
+  int NameCnt = -1;
+  if (GSymTable.DupCnt.find(Name) != GSymTable.DupCnt.end()) {
+    NameCnt = GSymTable.DupCnt[Name];
+  } 
+  GSymTable.DupCnt[Name] = NameCnt+1;
+  if (NameCnt >= 0) {
+    Name += std::to_string(NameCnt);
+  }
+  GSymTable.Table.push_back(Name);
+  return GSymTable.Table.size() - 1;
+}
+
 /////////////
 // IRExpr //
 ///////////
 
 void IndexIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   assert(Ind);
-  Out << "&(" << Arr->Name << "[";
+  Out << "&(" << GetSym(Arr->Name) << "[";
   Ind->print(Out, Ctx);
   Out << "])";
 }
@@ -56,7 +75,7 @@ IRExpr* DRefIRExpr::clone() {
 
 void AccessIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Struct);
-  Out << Struct->Name;
+  Out << GetSym(Struct->Name);
   if (Arrow) {
     Out << "->";
   } else {
@@ -72,7 +91,7 @@ IRExpr* AccessIRExpr::clone() {
 
 void IdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Ident);
-  Out << Ident->Name;
+  Out << GetSym(Ident->Name);
 }
 
 IRExpr* IdentIRExpr::clone() {
@@ -275,14 +294,11 @@ IRStmt* SpawnNextIRStmt::clone() {
 
 void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Dest);
-  Out << "spawn ";
+  Out << "espawn @";
   Dest->print(Out, Ctx);
   Out << " ";
-  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
-    Out << (*F)->getName();
-  } else {
-    Out << std::get<ASTVarRef>(Fn)->getName();
-  }
+  Out << SN->Fn->getName();
+  Out << "(";
   bool first = true;
   for (auto &Arg : Args) {
     if (first) {
@@ -292,6 +308,7 @@ void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
     }
     Arg->print(Out, Ctx);
   }
+  Out << ")";
 }
 
 IRStmt* ESpawnIRStmt::clone() {
@@ -299,11 +316,7 @@ IRStmt* ESpawnIRStmt::clone() {
   for (auto &Arg : Args) {
     NewArgs.push_back(Arg->clone());
   }
-  if (auto *F = std::get_if<IRFunction *>(&Fn)) {
-    return new ESpawnIRStmt(dyn_cast<IRLvalExpr>(Dest->clone()), *F, NewArgs);
-  } else {
-    return new ESpawnIRStmt(dyn_cast<IRLvalExpr>(Dest->clone()), std::get<ASTVarRef>(Fn), NewArgs);
-  }
+  return new ESpawnIRStmt(dyn_cast<IRLvalExpr>(Dest->clone()), SN, NewArgs, Local);
 }
 
 void ExprWrapIRStmt ::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
@@ -332,7 +345,7 @@ IRStmt* StoreIRStmt::clone() {
 
 void CopyIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Dest);
-  Out << Dest->Name << " = ";
+  Out << GetSym(Dest->Name) << " = ";
   Src->print(Out, Ctx);
 }
 
@@ -349,6 +362,22 @@ void SyncIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
 IRStmt* SyncIRStmt::clone() {
   return new SyncIRStmt();
 }
+
+void ClosureDeclIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
+  Out << "cdef ";
+  Out << Fn->getName();
+  Out << "(";
+  for (auto &[src,dst] : Caller2Callee) {
+    Out << " " << GetSym(src->Name);
+  }
+  Out << " )";
+}
+
+IRStmt* ClosureDeclIRStmt::clone() {
+  PANIC("unimplemented");
+  return nullptr;
+}
+
 
 void ReturnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   Out << "return ";
@@ -459,12 +488,9 @@ void IRFunction::cleanVars() {
 
   for (auto &B: *this) {
     for (auto &S: *B) {
-      for (auto *D: ExprIdentifierVisitor(S.get())) {
-        accessed.insert(D);
-      }
-      if (auto *CS = dyn_cast<CopyIRStmt>(S.get())) {
-        accessed.insert(CS->Dest);
-      }
+      ExprIdentifierVisitor _(S.get(), [&](auto &VR, bool lhs){ 
+        accessed.insert(VR);
+      });
     }
   }
 
@@ -574,8 +600,8 @@ void IRFunction::dumpArgs(llvm::raw_ostream &out) {
 // IRPRogram //
 //////////////
 
-IRFunction *IRProgram::createFunc() {
-  IRFuncPtr F = std::make_unique<IRFunction>(Funcs.size(), this);
+IRFunction *IRProgram::createFunc(const std::string &Name) {
+  IRFuncPtr F = std::make_unique<IRFunction>(Funcs.size(), Name, this);
   IRFunction *Fp = F.get();
   Funcs.push_back(std::move(F));
   return Fp;
@@ -603,7 +629,7 @@ void IRProgram::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
   //}
   out << "}\n";
 }
-/*
+
 
 ////////////////////////
 // ScopedIRTraverser //
@@ -670,8 +696,7 @@ void ScopedIRTraverser::traverse(IRFunction &F) {
 
       visitBlock(B);
 
-      auto *Trm = B->Terminator ? B->Terminator->innerStmt : nullptr;
-      if (Trm && isa<IfStmt>(Trm)) {
+      if (B->Term && isa<IfIRStmt>(B->Term)) {
         auto *ThenB = B->Succs[0];
         auto *ElseB = B->Succs[1];
         auto *JoinB = FindJoin(ThenB, ElseB);
@@ -688,8 +713,7 @@ void ScopedIRTraverser::traverse(IRFunction &F) {
         }
         WorkList.push_back(WorkItem(ThenB));
         WorkList.push_back(WorkItem(Open));
-      } else if (Trm && isa<ForStmt>(Trm) ) {
-        // && B->Terminator->Kind == IRStmt::Default
+      } else if (B->Term && isa<LoopIRStmt>(B->Term) ) {
         auto *BodyB = B->Succs[0];
         auto *AfterB = B->Succs[1];
         // The common successor of the body and the loop itself should be the loop.
@@ -712,4 +736,4 @@ void ScopedIRTraverser::traverse(IRFunction &F) {
       handleScope(W.SE);
     }
   }
-}*/
+}

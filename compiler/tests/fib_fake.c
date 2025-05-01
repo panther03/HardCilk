@@ -18,6 +18,7 @@ long fib(long n) {
     }
     cilk_sync;
     long D;
+    x = 3 + x;
     a = cilk_spawn fib(x-1);
     z = cilk_spawn fib(n-3);
     cilk_sync;

@@ -241,7 +241,7 @@ private:
   }
 
   void handleSpawnNextDecl(IRStmt *S, IRFunction *F) {
-    assert(S->Kind == IRStmt::SpawnNextDecl);
+    assert(S->Kind == IRStmt::ClosureDecl);
     std::string SpawnNextFnName = "sn_" + std::to_string(S->SpawnNextDest->getInd());
     printIndentation();
     Out << SpawnNextFnName << "_closure " << "SN_" << SpawnNextFnName << "c";
@@ -305,7 +305,7 @@ private:
     switch (S->Kind) {
       case IRStmt::ForInc: return;
       case IRStmt::ForInit: return;
-      case IRStmt::SpawnNextDecl: handleSpawnNextDecl(S, F); break;
+      case IRStmt::ClosureDecl: handleSpawnNextDecl(S, F); break;
       case IRStmt::SpawnNext: handleSpawnNext(S, F); break;
       default: {
         if (isa<NullStmt>(S->innerStmt)) {

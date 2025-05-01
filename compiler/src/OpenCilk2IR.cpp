@@ -95,9 +95,10 @@ class Stmt2IRVisitor : public clang::StmtVisitor<Stmt2IRVisitor> {
       for (auto *D: Node->decls()) {
         IRVarRef VR;
         if (auto *VD= dyn_cast<ValueDecl>(D)) { 
+          Sym VDS = PutSym(VD->getName().str());
           F->Vars.push_back(IRVarDecl {
             .Type = VD->getType().getTypePtr(),
-            .Name = VD->getName().str(),
+            .Name = VDS,
             .DeclLoc = IRVarDecl::LOCAL
           });
           VR = &F->Vars.back();
@@ -441,7 +442,7 @@ class Stmt2IRVisitor : public clang::StmtVisitor<Stmt2IRVisitor> {
 
 using FunLookupTy = std::unordered_map<const clang::FunctionDecl*, IRFunction*>;
 
-class Cilk2IRVisitor2 : public clang::RecursiveASTVisitor<Cilk2IRVisitor2> {
+class Cilk2IRVisitor : public clang::RecursiveASTVisitor<Cilk2IRVisitor> {
 private:
   clang::ASTContext *Context;
   IRProgram &P;
@@ -449,18 +450,19 @@ private:
 
 public:
   FunLookupTy FunLookup;
-  explicit Cilk2IRVisitor2(clang::ASTContext *Context, IRProgram &P,
+  explicit Cilk2IRVisitor(clang::ASTContext *Context, IRProgram &P,
                           NullStmt &Sentinel)
       : Context(Context), P(P), Sentinel(Sentinel) {}
 
   bool VisitFunctionDecl(clang::FunctionDecl *Decl) { 
     if (Decl->getBody()) {
-      IRFunction *F = P.createFunc();
+      IRFunction *F = P.createFunc(Decl->getName().str());
       std::unordered_map<ASTVarRef, IRVarRef> VarLookup;
       for (auto *Param : Decl->parameters()) {
+        Sym PSym = PutSym(Param->getName().str());
         F->Vars.push_back(IRVarDecl {
           .Type = Param->getType().getTypePtr(),
-          .Name = Param->getName().str(),
+          .Name = PSym,
           .DeclLoc = IRVarDecl::ARG
         });
         VarLookup[Param] = &F->Vars.back();
@@ -507,7 +509,7 @@ void finalizeFunction(IRFunction *F, FunLookupTy &FunLookup) {
 }
 
 void OpenCilk2IR(IRProgram &P, clang::ASTContext *Context, SourceManager &SM, NullStmt &Sentinel) {
-  Cilk2IRVisitor2 Visitor(Context, P, Sentinel);
+  Cilk2IRVisitor Visitor(Context, P, Sentinel);
   // Only visit declarations declared in the input TU
   auto Decls = Context->getTranslationUnitDecl()->decls();
   for (auto &Decl : Decls) {
