@@ -10,6 +10,7 @@
 #include "Cilk1EmuTarget.hpp"
 #include "IR.hpp"
 #include "util.hpp"
+#include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCilk.h"
 #include "clang/AST/Stmt.h"
@@ -21,43 +22,34 @@
 //////////////////////////////////////
 
 void printFunDecl(IRFunction *F, llvm::raw_ostream &out, clang::ASTContext &C) {
-  if (F->RootFun) {
-    if (F->NeedsCont) {
-      out << "THREAD(" << F->RootFun->getName() << ")";
-    } else {
-      out << F->RootFun->getReturnType().getAsString();
-      out << " " << F->RootFun->getName() << "(";
-      bool first = true;
-      for (auto &ArgDecl : F->RootFun->parameters()) {
-        if (!first) {
-          out << ", ";
-        } else {
-          first = false;
-        }
-        ArgDecl->print(out, 0);
+  if (F->Info.IsTask) {
+    out << "THREAD(" << F->getName() << ")";
+  } else if (F->Info.RootFun) {
+    out << F->Info.RootFun->getReturnType().getAsString();
+    out << " " << F->Info.RootFun->getName() << "(";
+    bool first = true;
+    for (auto &ArgDecl : F->Info.RootFun->parameters()) {
+      if (!first) {
+        out << ", ";
+      } else {
+        first = false;
       }
-      out << ")";
+      ArgDecl->print(out, 0);
     }
+    out << ")";
   } else {
-    out << "THREAD(sn_" << F->getInd() << ")";
+    PANIC("Non-root fun should be a task!");  
   }
 }
 
 void printClosureDecl(IRFunction *F, llvm::raw_ostream &out,
                       clang::ASTContext &C) {
-  out << "CLOSURE_DEF(";
-  F->printName(out);
-  out << ",\n";
-  for (auto *Arg : F->Args) {
-    out << TAB;
-    Arg->print(out, C.getPrintingPolicy());
-    out << ";\n";
-  }
-  for (auto *Mat : F->Materialized) {
-    if (auto *MatV = dyn_cast<VarDecl>(Mat)) {
+  out << "CLOSURE_DEF(" << F->getName() << ",\n";
+  for (auto &Var : F->Vars) {
+    if (Var.DeclLoc == IRVarDecl::ARG) {
       out << TAB;
-      MatV->getType().print(out, C.getPrintingPolicy());
-      out << " " << MatV->getName() << ";\n";
+      Var.Type.print(out, C.getPrintingPolicy());
+      out << " " << GetSym(Var.Name) << ";\n";
     }
   }
   out << ");\n";
@@ -73,8 +65,8 @@ void printOriginalSource(IRProgram &P, llvm::raw_ostream &out,
   SourceManager &SM = CI.getSourceManager();
   R.setSourceMgr(SM, CI.getLangOpts());
   for (auto &F: P) {
-    if (F->RootFun) {
-      R.RemoveText(F->RootFun->getSourceRange());
+    if (F->Info.RootFun) {
+      R.RemoveText(F->Info.RootFun->getSourceRange());
     }
   }
   R.getEditBuffer(SM.getMainFileID()).write(out);
@@ -84,6 +76,17 @@ void printOriginalSource(IRProgram &P, llvm::raw_ostream &out,
 // 3. Print IR Functions //
 //////////////////////////
 
+void printLocals(IRFunction *F, clang::ASTContext &C, llvm::raw_ostream &Out) {
+  for (auto &Local: F->Vars) {
+    if (Local.DeclLoc == IRVarDecl::LOCAL) {
+      Out << TAB;
+      Local.Type.print(Out, C.getPrintingPolicy());
+      Out << " " << GetSym(Local.Name) << ";\n";
+    }
+  }
+}
+
+/*
 struct DeclInfo {
   int ReuseCnt;
   enum { Arg, Local } Type;
@@ -135,6 +138,7 @@ bool DeclMapLookup(DeclMap &DM, IRFunction *F, IRVarRef VR, std::string &replace
 
   switch (DI.Type) {
     case DeclInfo::Arg: {
+
       replaced = "largs->" + VR->getName().str();
       return true;
     }
@@ -163,24 +167,7 @@ void DeclMapPrint(DeclMap &DM) {
   }
 }
 
-void printLocals(DeclMap &DM, IRFunction *F, clang::ASTContext &C, llvm::raw_ostream &Out) {
-  
-  for (auto *Local: F->Locals) {
-    if (const auto *VL = dyn_cast<VarDecl>(Local)) {
-      DeclInfo DI = DM[DM_ENT(F, Local)];
-      Out << TAB;
-      VL->getType().print(Out, C.getPrintingPolicy());
-      Out << " ";
-      Out << VL->getName();
-      if (DI.ReuseCnt > 0) {
-        Out << DI.ReuseCnt;
-      }
-      Out << ";\n";
-    } else {
-      PANIC("Unsupported local type, tried to cast local to VarDecl\n");
-    }
-  }
-}
+
 
 class StmtNameRemapper : public clang::RecursiveASTVisitor<StmtNameRemapper> {
 private:
@@ -199,166 +186,124 @@ public:
     }
     return true;
   }
-};
+}; */
 
 class Cilk1EmuPrinter : public ScopedIRTraverser {
 private:
-  DeclMap &DM;
-  Rewriter &R;
   llvm::raw_ostream &Out;
-  clang::ASTContext &C;
+  IRPrintContext &C;
   int SpawnCtr = 0;
-  int Indent = 1;
+  int IndentLvl = 1;
 
-  void printIndentation() {
-    for (int i = 0; i < Indent; i++) Out << TAB;
+  llvm::raw_ostream& Indent() {
+    for (int i = 0; i < IndentLvl; i++) Out << TAB;
+    return Out;
   }
 
   void handleScope(ScopeEvent SE) override {
     switch (SE) { 
       case ScopeEvent::Close: {
-        assert(Indent > 0);
-        Indent--;
-        printIndentation();
-        Out << "}\n";
+        assert(IndentLvl > 0);
+        IndentLvl--;
+        Indent() << "}\n";
         break;
       }
       case ScopeEvent::Open: {
         Out << " {\n";
-        Indent++;
+        IndentLvl++;
         break;
       }
       case ScopeEvent::Else: {
-        assert(Indent > 0);
-        Indent--;
-        printIndentation();
-        Out << "} else {\n";
-        Indent++;
+        assert(IndentLvl > 0);
+        IndentLvl--;
+        Indent() << "} else {\n";
+        IndentLvl++;
         break;
       }
       default: {}
     }
   }
 
-  void handleSpawnNextDecl(IRStmt *S, IRFunction *F) {
-    assert(S->Kind == IRStmt::ClosureDecl);
-    std::string SpawnNextFnName = "sn_" + std::to_string(S->SpawnNextDest->getInd());
-    printIndentation();
-    Out << SpawnNextFnName << "_closure " << "SN_" << SpawnNextFnName << "c";
-    if (F->NeedsCont) {
+  void handleSpawnNextDecl(ClosureDeclIRStmt *DS, IRFunction *F) {
+    const std::string &SpawnNextFnName = DS->Fn->getName();
+    Indent() << SpawnNextFnName << "_closure " << "SN_" << SpawnNextFnName << "c";
+    if (F->Info.IsTask) {
       Out << "(largs->k);\n";
     } else {
       Out << "(CONT_DUMMY);\n";
     }
-    printIndentation();
+    Indent();
     Out << "spawn_next<" << SpawnNextFnName << "_closure> " << "SN_" << SpawnNextFnName << "(SN_" << SpawnNextFnName << "c);\n";
     
   }
 
-  void handleSpawnNext(IRStmt *S, IRFunction *F) {
-    assert(S->Kind == IRStmt::SpawnNext);
-    std::string SpawnNextFnName = "sn_" + std::to_string(S->SpawnNextDest->getInd());
-    for (auto *Arg : S->SpawnNextDest->Args) {
-      printIndentation();
-      Out << "((" << SpawnNextFnName << "_closure*)SN_" << SpawnNextFnName << ".cls.get())->" << Arg->getName() << " = ";
-      std::string Name = Arg->getName().str();
-      DeclMapLookup(DM, F, Arg, Name);
-      Out << Name << ";\n";
+  void handleSpawnNext(SpawnNextIRStmt *S, IRFunction *F) {
+    const std::string &SpawnNextFnName = S->Fn->getName();
+    for (auto &[SrcVar,DstVar] : S->Decl->Caller2Callee) {
+      if (!SrcVar->IsEphemeral) {
+        Indent() << "((" << SpawnNextFnName << "_closure*)SN_" << SpawnNextFnName;
+        Out << ".cls.get())->" << GetSym(SrcVar->Name) << " = ";
+        S->Fn->printVar(Out, DstVar);
+        Out << ";\n";
+      }
     }
-    printIndentation();
-    Out << "// Original sync was here\n";
+    Indent() << "// Original sync was here\n";
   }
 
-  void handleSpawn(IRStmt *S, IRFunction *F) {
-    auto *CSE = dyn_cast<CilkSpawnExpr>(S->innerStmt);
-    assert(CSE);
-    auto *CallE = dyn_cast<CallExpr>(CSE->getSpawnedExpr());
-    assert(CallE);
-    auto *CalleeND = dyn_cast<FunctionDecl>(CallE->getCalleeDecl());
-    assert(CalleeND);
-    std::string SpawnFnName = CalleeND->getName().str();
-    printIndentation();
-    Out << "cont sp" << SpawnCtr << "k;\n";
-    assert(S->Lhs);
-    auto *ContF = F->SpawnNext2Cont[F->Spawn2SpawnNext[S]];
-    assert(ContF);
-    printIndentation();
-    Out << "SN_BIND(SN_sn_" << ContF->getInd() << ", &sp" << SpawnCtr << "k, " << S->Lhs->getName() << ");\n";
-    printIndentation();
-    Out << SpawnFnName << "_closure sp" << SpawnCtr << "c(sp" << SpawnCtr << "k);\n";
+  void handleSpawn(ESpawnIRStmt *ES, IRFunction *F) {
+    const std::string &SpawnFnName = ES->Fn->getName();
+    const std::string &SpawnNextFnName = ES->SN->Fn->getName();
+    Indent() << "cont sp" << SpawnCtr << "k;\n";
+    // TODO make it work on non-local
+    assert(ES->Local);
+    auto *IdentDest = dyn_cast<IdentIRExpr>(ES->Dest.get());
 
-    int Ind = 0;
+    Indent() << "SN_BIND(SN_" << SpawnNextFnName << ", &sp" << SpawnCtr << "k, " << GetSym(IdentDest->Ident->Name) << ");\n";
+    Indent() << SpawnFnName << "_closure sp" << SpawnCtr << "c(sp" << SpawnCtr << "k);\n";
 
-    for (auto *Arg: CallE->arguments()) {
-      printIndentation();
-      Out << "sp" << SpawnCtr << "c." << CalleeND->getParamDecl(Ind)->getName();
-      Out << " = " << R.getRewrittenText(Arg->getSourceRange()) << ";\n";
-      Ind++;
+    // we do not create spawn destination functions. 
+    // we expect them to be in argument first order
+    assert(ES->Fn->Info.RootFun);
+    auto DstArgIt = ES->Fn->Vars.begin();
+    for (auto &Arg: ES->Args) {
+      auto &DstArg = *DstArgIt;
+      assert(DstArg.DeclLoc == IRVarDecl::ARG);
+      Indent() << "sp" << SpawnCtr << "c." << GetSym(DstArg.Name);
+      Out << " = ";
+      Arg->print(Out, C);
+      Out << ";\n";
+      DstArgIt++;
     }
 
-    printIndentation();
-    Out << "spawn<" << SpawnFnName << "_closure> sp"  << SpawnCtr << "(sp" << SpawnCtr << "c);\n\n";
+    Indent() << "spawn<" << SpawnFnName << "_closure> sp"  << SpawnCtr << "(sp" << SpawnCtr << "c);\n\n";
   }
 
   void visitStmt(IRStmt *S, IRBasicBlock *B) {
     auto *F = B->getParent();
-    switch (S->Kind) {
-      case IRStmt::ForInc: return;
-      case IRStmt::ForInit: return;
-      case IRStmt::ClosureDecl: handleSpawnNextDecl(S, F); break;
-      case IRStmt::SpawnNext: handleSpawnNext(S, F); break;
-      default: {
-        if (isa<NullStmt>(S->innerStmt)) {
-          return;
-        }
+    if (S->Silent) return;
 
-        if (isa<CilkSpawnExpr>(S->innerStmt)) {
-          handleSpawn(S, F);
-          SpawnCtr++;
-          return;
-        }
-
-        printIndentation();
-
-        if (S->Lhs) {
-          std::string LhsName = S->Lhs->getName().str();
-          DeclMapLookup(DM, F, S->Lhs, LhsName);
-          Out << LhsName << " = ";
-        }
-//
-
-        if (auto *RS = dyn_cast<ReturnStmt>(S->innerStmt)) {
-          if (F->NeedsCont) {
-            Out << "SEND_ARGUMENT(largs->k, " << R.getRewrittenText(RS->getRetValue()->getSourceRange()) << ");\n"; 
-          } else {
-            Out << R.getRewrittenText(RS->getSourceRange()) << ";\n";
-          }
-        } else if (auto *FS = dyn_cast<ForStmt>(S->innerStmt)) {
-          Out << "for (";
-          if (auto *ID = dyn_cast<DeclStmt>(FS->getInit())) {
-            if (ID->child_begin() != ID->child_end()) {
-              auto *LoopInitDecl = dyn_cast<NamedDecl>(ID->getSingleDecl());
-              assert(LoopInitDecl);
-              std::string InitVarName = LoopInitDecl->getName().str();
-              DeclMapLookup(DM, F, LoopInitDecl, InitVarName);
-              Out << InitVarName << " = ";
-              Out << R.getRewrittenText((*ID->child_begin())->getSourceRange());
-            }
-          } else {
-            Out << R.getRewrittenText(FS->getInit()->getSourceRange());
-          }
-          Out << "; ";
-          Out << R.getRewrittenText(FS->getCond()->getSourceRange()) << "; ";
-          Out << R.getRewrittenText(FS->getInc()->getSourceRange()) << ")";
-        } else if (auto *IS = dyn_cast<IfStmt>(S->innerStmt)) {
-          Out << "if (" << R.getRewrittenText(IS->getCond()->getSourceRange()) << ")";
-        } else {
-          Out << R.getRewrittenText(S->innerStmt->getSourceRange());
-          if (isa<Expr>(S->innerStmt)) {
-            Out << ";\n";
-          }
-        }
-        break;
+    if (auto *ES = dyn_cast<ESpawnIRStmt>(S)) {
+      handleSpawn(ES, F);
+      SpawnCtr++;
+    } else if (auto *SNS = dyn_cast<SpawnNextIRStmt>(S)) {
+      handleSpawnNext(SNS, F);
+    } else if (auto *CDS = dyn_cast<ClosureDeclIRStmt>(S)) {
+      handleSpawnNextDecl(CDS, F);
+    } else if (auto *RS = dyn_cast<ReturnIRStmt>(S)) {
+      Indent();
+      if (F->Info.IsTask) {
+        Out << "SEND_ARGUMENT(largs->k, ";
+        RS->RetVal->print(Out, C);
+        Out << ");\n"; 
+      } else {
+        RS->print(Out, C);
+        Out << ";\n";
+      }
+    } else { 
+      Indent();
+      S->print(Out, C);
+      if (!isa<IfIRStmt>(S) && !isa<LoopIRStmt>(S)) {
+        Out << ";\n";
       }
     }
   }
@@ -368,11 +313,11 @@ private:
     for (auto &S: *B) {
       visitStmt(S.get(), B);
     }
-    if (B->Terminator) visitStmt(B->Terminator.get(), B);
+    if (B->Term) visitStmt(B->Term, B);
   }
 
 public:
-  Cilk1EmuPrinter(DeclMap &DM, llvm::raw_ostream &Out, clang::ASTContext &C, Rewriter &R) : DM(DM), Out(Out), C(C), R(R) {}
+  Cilk1EmuPrinter(llvm::raw_ostream &Out, IRPrintContext &C) : Out(Out), C(C) {}
 };
 
 void PrintCilk1Emu(IRProgram &P, llvm::raw_ostream &out, clang::ASTContext &C,
@@ -386,72 +331,38 @@ void PrintCilk1Emu(IRProgram &P, llvm::raw_ostream &out, clang::ASTContext &C,
   }
   out << "\n";
   for (auto &F : P) {
-    if (F->NeedsCont) {
+    if (F->Info.IsTask) {
       printClosureDecl(F.get(), out, C);
     }
   }
   // 2. Print the original source file with the original root functions removed.
   printOriginalSource(P, out, C, CI);
 
-  // 3. Print the implementation of each function.
-  DeclMap DM;
-  for (auto &F: P) {
-    DeclMapInit(DM, F.get());
-  }
-
-  Rewriter R;
-  R.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-  StmtNameRemapper SMR(DM, R);
-  // whole thing will implode if statements are visited by twice
-  // very hacked together
-  for (auto &F: P) {
-    SMR.F = F.get();
-    for (auto &B: *F) {
-      for (auto &S: *B) {
-        if (S->Kind != IRStmt::ForInc && S->Kind != IRStmt::ForInit) {
-          SMR.TraverseStmt(const_cast<Stmt*>(S->innerStmt));
-        }
-      }
-      if (B->Terminator) {
-        auto *T = B->Terminator.get();
-        if (auto *FS = dyn_cast<ForStmt>(T->innerStmt)) {
-          SMR.TraverseStmt(const_cast<Expr*>(FS->getCond()));
-          SMR.TraverseStmt(const_cast<Stmt*>(FS->getInit()));
-          SMR.TraverseStmt(const_cast<Expr*>(FS->getInc()));
-        } else if (auto *IS = dyn_cast<IfStmt>(T->innerStmt)) {
-          SMR.TraverseStmt(const_cast<Expr*>(IS->getCond()));
-        } else {
-          SMR.TraverseStmt(const_cast<Stmt*>(T->innerStmt));
-          
-        }
-      }
-    }
-  }
-  //R.getEditBuffer(CI.getSourceManager().getMainFileID()).write(out);
-  
+  // 3. Print the implementation of each function.  
   for (auto &F: P) {
     
     printFunDecl(F.get(), out, C);
     out << " {\n";
 
-    printLocals(DM, F.get(), C, out);
+    printLocals(F.get(), C, out);
 
-    if (F->NeedsCont) {
-      out << TAB;
-      F->printName(out);
-      out << "_closure *largs = (";
-      F->printName(out);
-      out << "_closure*)(args.get());\n";
+    if (F->Info.IsTask) {
+      out << TAB << F->getName() << "_closure *largs = (" << F->getName() << "_closure*)(args.get());\n";
     }
 
     
-    Cilk1EmuPrinter Printer(DM, out, C, R);
+    auto IRC = IRPrintContext {
+      .ASTCtx = C,
+      .NewlineSymbol = "\n",
+      .GraphVizEscapeChars = false
+    };
+    Cilk1EmuPrinter Printer(out, IRC);
     Printer.traverse(*F);
-    if (F->NeedsCont) {
+    if (F->Info.IsTask) {
       out << "    return;\n";
     }
     // great hack
-    if (F->RootFun && F->RootFun->getName() == "main") {
+    if (F->getName() == "main") {
       out << "    return 0;\n";
     }
     out << "}\n";

@@ -53,7 +53,7 @@ private:
     Paths.resize(1);
 
     std::vector<std::pair<IRBasicBlock *, int>> Todo;
-    Todo.push_back(std::make_pair(F.entry(), 0));
+    Todo.push_back(std::make_pair(F.getEntry(), 0));
 
     int Fresh = 0;
     while (!Todo.empty()) {
@@ -99,6 +99,28 @@ private:
     }
   }
 
+  void analyzeStmt(IRStmt *S, std::set<IRVarRef> &free, std::set<IRVarRef> &refd) {
+    std::set<IRVarRef> V;
+      ExprIdentifierVisitor _(S, [&](auto &VR,bool lhs) {
+        if (!lhs) {
+          V.insert(VR);
+        }
+      });
+      for (auto *D: V) {
+        if (refd.find(D) == refd.end()) {
+          free.insert(D);
+          refd.insert(D);
+        }
+      }
+
+      if (auto *CS = dyn_cast<CopyIRStmt>(S)) {
+        if (refd.find(CS->Dest) == refd.end()) {
+          refd.insert(CS->Dest);
+          free.erase(CS->Dest);
+        }
+    }
+  }
+
   // TODO: this function is not going to handle more complex cases like
   // a store being present in only one branch and a load at the join
   // (so the value is free for the whole function)
@@ -115,27 +137,13 @@ private:
         free.insert(v);
       }
     }
+
     for (auto &bb : path) {
       for (auto &S : *bb) {
-        std::set<IRVarRef> V;
-        ExprIdentifierVisitor _(S.get(), [&](auto &VR,bool lhs) {
-          if (!lhs) {
-            V.insert(VR);
-          }
-        });
-        for (auto *D: V) {
-          if (refd.find(D) == refd.end()) {
-            free.insert(D);
-            refd.insert(D);
-          }
-        }
-
-        if (auto *CS = dyn_cast<CopyIRStmt>(S.get())) {
-          if (refd.find(CS->Dest) == refd.end()) {
-            refd.insert(CS->Dest);
-            free.erase(CS->Dest);
-          }
-        }
+        analyzeStmt(S.get(), free, refd);
+      }
+      if (bb->Term) {
+        analyzeStmt(bb->Term, free, refd);
       }
     }
     for (auto *v : free) {
@@ -174,6 +182,7 @@ public:
         .Args = std::set<IRVarRef>(),
         .Locals = std::set<IRVarRef>()
       };
+      CF.F->Info.IsTask = true;
       ContFuns.push_back(CF);
     }
     // just used for checking assumptions
@@ -220,7 +229,8 @@ public:
           CF.F->Vars.push_back(IRVarDecl {
             .Type = Arg->Type,
             .Name = Arg->Name,
-            .DeclLoc = IRVarDecl::ARG
+            .DeclLoc = IRVarDecl::ARG,
+            .Parent = CF.F
           });
           Remap[Arg] = &(CF.F->Vars.back());
         }
@@ -228,7 +238,8 @@ public:
           CF.F->Vars.push_back(IRVarDecl {
             .Type = Local->Type,
             .Name = Local->Name,
-            .DeclLoc = IRVarDecl::LOCAL
+            .DeclLoc = IRVarDecl::LOCAL,
+            .Parent = CF.F
           });
           Remap[Local] = &(CF.F->Vars.back());
         }
@@ -261,7 +272,7 @@ public:
           }
         }
         if (SpawnNextDest) {
-          B->getParent()->SpawnNext2Cont[B] = SpawnNextDest;
+          B->getParent()->Info.SpawnNextList.insert(SpawnNextDest);
         }
       }
     }
@@ -280,14 +291,11 @@ public:
   }
 };
 
+//////////////////////////
+// FinalizeExplicitCPS //
+////////////////////////
 
-
-
-//////////////////
-// FinalizeCPS //
-////////////////
-
-struct FinalizeCPS {
+struct FinalizeExplicitCPS {
   class ScopeStartMapper : public ScopedIRTraverser {
     private:
       std::unordered_map<IRBasicBlock *, IRBasicBlock *> &ScopeStarts;
@@ -391,6 +399,7 @@ struct FinalizeCPS {
           // TODO: a check for other ispawns embedded in the expr
           IS = dyn_cast<ISpawnIRExpr>(CS->Src.get());
           if (IS) {
+            CS->Dest->IsEphemeral = true;
             Dest = new IdentIRExpr(CS->Dest);
             CS->Src.release();
           }
@@ -416,130 +425,31 @@ struct FinalizeCPS {
             Arg.release();
           }
 
+          IRFunction *Fn = nullptr;
+          if (auto SFn = std::get_if<IRFunction *>(&IS->Fn)) {
+            Fn = *SFn;
+          } else {
+            PANIC("Implicit spawn destination still unknown, needs to be known for explicit conversion");
+          }
+
           delete IS;
 
-          S = std::make_unique<ESpawnIRStmt>(Dest, SN, Args, Local);
+
+          S = std::make_unique<ESpawnIRStmt>(Dest, Fn, SN, Args, Local);
         }
       }
     }
   }
 
-  FinalizeCPS(IRFunction *F) {
+  FinalizeExplicitCPS(IRFunction *F) {
     std::unordered_map<IRBasicBlock *, IRBasicBlock *> ScopeStarts;
     ScopeStartMapper SSM(ScopeStarts);
-    SSM.reset(F->entry());
+    SSM.reset(F->getEntry());
     SSM.traverse(*F);
     AddClosureDecls(F, ScopeStarts);
     MakeSpawnsExplicit(F);
   }
 };
-
-/*
-
-
-//////////////////////
-// SetupArgsLocals //
-////////////////////
-
-struct SetupArgsLocals {
-  
-
-  void FindContForSpawns(IRFunction *F) {
-    for (auto &B : *F) {
-      std::vector<IRStmt *> SpawnStatements;
-      for (auto &S : *B) {
-        if (auto *BS = dyn_cast<BinaryOperator>(S->innerStmt)) {
-          // This case should never happen. Should have been incorporated into
-          // the LHS before. Unless there is an assignment like a = b = c =
-          // spawn, but that should be flagged before.
-          assert(!isa<CilkSpawnExpr>(BS->getRHS()));
-        } else if (isa<CilkSpawnExpr>(S->innerStmt)) {
-          SpawnStatements.push_back(S.get());
-        }
-      }
-
-      if (!SpawnStatements.empty()) {
-        IRBasicBlock *SpawnNext = DFSTillSpawnNext(B.get());
-        if (SpawnNext) {
-          for (auto &SpawnS : SpawnStatements) {
-            F->Spawn2SpawnNext[SpawnS] = SpawnNext;
-          }
-        }
-      }
-    }
-  }
-
-  void PushBackSpawnVars(IRFunction *F) {
-    for (auto &B : *F) {
-      for (auto &S : *B) {
-        if (isa<CilkSpawnExpr>(S->innerStmt)) {
-          S->Kind = IRStmt::VoidSpawn;
-          if (S->Lhs) {
-            if (F->Spawn2SpawnNext.find(S.get()) == F->Spawn2SpawnNext.end()) {
-              
-            }
-            auto *SpawnNextF = F->SpawnNext2Cont[F->Spawn2SpawnNext[S.get()]];
-            F->Locals.erase(S->Lhs);
-            SpawnNextF->Args.erase(S->Lhs);
-            SpawnNextF->Materialized.insert(S->Lhs);
-          }
-        }
-      }
-    }
-  }
-
-  
-
-  SetupArgsLocals(IRFunction &Root, std::vector<IRFunction *> &ContFuns) {
-    std::vector<IRFunction *> FnWorkList;
-    FnWorkList.push_back(&Root);
-    for (auto CF : ContFuns) {
-      FnWorkList.push_back(CF);
-    }
-
-    std::unordered_map<IRBasicBlock *, IRBasicBlock *> ScopeStarts;
-    ScopeStartMapper SSM(ScopeStarts);
-    for (auto F : FnWorkList) {
-      FindContForSpawns(F);
-      PushBackSpawnVars(F);
-      SSM.reset(F->entry());
-      SSM.traverse(*F);
-      AddSpawnNextDecls(F, ScopeStarts);
-    }
-
-    outs() << "Root:\n";
-    Root.dumpArgs(outs());
-
-    int I = 0;
-    for (auto &CF : ContFuns) {
-      outs() << "ContF" << CF->getInd() << ":\n";
-      CF->dumpArgs(outs());
-      I++;
-    }
-  }
-};
-
-///////////
-// Glue //
-/////////
-
-void MarkContFuns(IRFunction *F) {
-  // Mark functions that need continuations as such.
-  for (auto &B : *F) {
-    for (auto &S : *B) {
-      if (auto *SpawnE = dyn_cast<CilkSpawnExpr>(S->innerStmt)) {
-        if (auto *CallE = dyn_cast<CallExpr>(SpawnE->getSpawnedExpr())) {
-          if (auto *ND = dyn_cast<NamedDecl>(CallE->getCalleeDecl())) {
-            if (F->getParent()->RootFunLookup.find(ND->getNameAsString()) != F->getParent()->RootFunLookup.end()) {
-              auto CF = F->getParent()->RootFunLookup[ND->getNameAsString()];
-              CF->NeedsCont = true;
-            }
-          }
-        }
-      }
-    }
-  }
-}*/
 
 void MakeExplicit(IRProgram &P) {
   std::vector<IRFunction *> WorkList;
@@ -554,9 +464,7 @@ void MakeExplicit(IRProgram &P) {
       FWorkList.push_back(CF.F);
     }
     for (auto *F: FWorkList) {
-      FinalizeCPS FC(F);
+      FinalizeExplicitCPS FC(F);
     }
-    //SetupArgsLocals SAL(*F, CCF.ContFuns);
-    //MarkContFuns(F);
   }
 }

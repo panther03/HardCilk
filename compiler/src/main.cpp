@@ -8,10 +8,8 @@
 #include <iostream>
 
 
-//#include "Cilk1EmuTarget.hpp"
-//#include "OpenCilk2IR.hpp"
+#include "Cilk1EmuTarget.hpp"
 #include "MakeExplicit.hpp"
-//#include "util.hpp"
 #include "OpenCilk2IR.hpp"
 #include "IR.hpp"
 
@@ -56,6 +54,8 @@ public:
       }
       P.dumpGraph(DotFile2, Context);
     }
+    llvm::raw_fd_ostream Cilk1Out(OutFilename, EC, llvm::sys::fs::OF_Text);
+    PrintCilk1Emu(P, Cilk1Out, Context, CI);
 /*
     OpenCilk2IR(P, &Context, SM, Sentinel);
 
@@ -77,8 +77,7 @@ public:
     auto *F0 = P.front().get();
     ScopedIRPrinter(&Context).traverse(*F0); 
 
-    llvm::raw_fd_ostream Cilk1Out(OutFilename, EC, llvm::sys::fs::OF_Text);
-    PrintCilk1Emu(P, Cilk1Out, Context, CI);
+    
 */
   }
 };

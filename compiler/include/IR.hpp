@@ -32,7 +32,7 @@ struct IRPrintContext {
   bool GraphVizEscapeChars = false;
 };
 
-typedef const clang::Type *IRType;
+typedef const clang::QualType IRType;
 typedef int Sym;
 
 struct SymTable {
@@ -44,11 +44,14 @@ extern SymTable GSymTable;
 extern const std::string& GetSym(Sym S);
 extern Sym PutSym(std::string Name);
 
-// TODO: doesn't take into account scoping
 struct IRVarDecl {
   IRType Type;
   Sym Name;
-  enum { LOCAL, EPHEMERAL, ARG } DeclLoc;
+  enum { LOCAL, ARG } DeclLoc;
+  bool IsEphemeral = false; 
+  // TODO: stopgap solution: probably right thing would be to override the printing methods
+  // so that this would be included as context when an IdentIRexpr is encountered
+  IRFunction* Parent;
 };
 
 typedef std::variant<ASTVarRef, IRFunction *> IRFunRef;
@@ -408,7 +411,11 @@ private:
   const IRStmtKind Kind;
 
 public:
+  bool Silent = false;
+
   IRStmtKind getKind() const { return Kind; }
+
+  void setSilent() { Silent = true; }
 
   IRStmt(IRStmtKind K) : Kind(K) {}
 
@@ -428,6 +435,10 @@ struct ClosureDeclIRStmt : IRStmt {
   std::unordered_map<IRVarRef, IRVarRef> Caller2Callee;
 public:
   ClosureDeclIRStmt(IRFunction *Fn) : Fn(Fn), IRStmt(STK_CLOSURE_DECL) {}
+
+  static bool classof(const IRStmt *S) {
+    return S->getKind() == IRStmt::STK_CLOSURE_DECL;
+  }
 
   void addCallerToCaleeVarMapping(IRVarRef VR1, IRVarRef VR2) {
     Caller2Callee[VR1] = VR2;
@@ -525,15 +536,17 @@ public:
 };
 
 struct ESpawnIRStmt : IRStmt {
+public:
   std::unique_ptr<IRLvalExpr> Dest;
+  IRFunction *Fn;
   SpawnNextIRStmt* SN;
   std::vector<std::unique_ptr<IRExpr>> Args;
   bool Local;
 
 public:
-  ESpawnIRStmt(IRLvalExpr *Dest, SpawnNextIRStmt* SN,
+  ESpawnIRStmt(IRLvalExpr *Dest, IRFunction *Fn, SpawnNextIRStmt* SN,
                std::vector<IRExpr*> InArgs, bool Local)
-      : Dest(Dest), SN(SN), IRStmt(STK_ESPAWN), Local(Local) {
+      : Dest(Dest), Fn(Fn), SN(SN), IRStmt(STK_ESPAWN), Local(Local) {
         for (auto *Arg : InArgs) {
           Args.push_back(std::unique_ptr<IRExpr>(Arg));
         }
@@ -771,6 +784,14 @@ private:
 };
 
 class IRFunction {
+public:
+  struct IRFunctionInfo {
+    bool IsTask = false;
+    const FunctionDecl *RootFun = nullptr;
+    std::set<IRFunction*> SendArgList;
+    std::set<IRFunction*> SpawnList;
+    std::set<IRFunction*> SpawnNextList;
+  };
 private:
   using IRBlockPtr = std::unique_ptr<IRBasicBlock>;
   IRProgram *Parent;
@@ -782,14 +803,11 @@ private:
 
 public:
   std::list<IRVarDecl> Vars;
-  const FunctionDecl *RootFun = nullptr;
   IRBasicBlock *Exit = nullptr;
+  IRFunctionInfo Info;
 
-  // bool NeedsCont = false;
   friend class IRBasicBlock;
   friend class IRProgram;
-  // std::unordered_map<const IRStmt *, IRBasicBlock *> Spawn2SpawnNext;
-  std::unordered_map<const IRBasicBlock *, IRFunction *> SpawnNext2Cont;
 
   IRFunction(unsigned Ind, const std::string &Name, IRProgram *Parent) : Parent(Parent), Ind(Ind), Name(Name) {}
   IRBasicBlock *createBlock();
@@ -802,6 +820,24 @@ public:
       out << GetSym(V.Name) << " ";
     }
     out << "\n";
+  }
+
+  void printVar(llvm::raw_ostream &Out, IRVarRef VR) {
+    switch (VR->DeclLoc) {
+      case IRVarDecl::ARG: {
+        if (Info.IsTask) {
+          Out << "largs->" << GetSym(VR->Name);
+        } else {
+          Out << GetSym(VR->Name);
+        }
+        break;
+      }
+      case IRVarDecl::LOCAL: {
+        Out << GetSym(VR->Name);
+        break;
+      }
+      default: PANIC("unsupported");
+    }
   }
 
   void print(llvm::raw_ostream &out, clang::ASTContext &Context);
@@ -818,8 +854,8 @@ public:
   IRBlockPtr &front() { return Blocks.front(); }
   IRBlockPtr &back() { return Blocks.back(); }
   // Front of the function should always be the entry block.
-  IRBasicBlock *entry() { return Blocks.front().get(); }
-  IRBasicBlock *exit() { return Exit; }
+  IRBasicBlock *getEntry() { return Blocks.front().get(); }
+  IRBasicBlock *getExit() { return Exit; }
 
   iterator begin() { return Blocks.begin(); }
   iterator end() { return Blocks.end(); }

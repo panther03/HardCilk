@@ -43,7 +43,7 @@ set(SOURCE_FILES
     src/IR.cpp
     src/OpenCilk2IR.cpp
     src/MakeExplicit.cpp
-#    src/Cilk1EmuTarget.cpp
+    src/Cilk1EmuTarget.cpp
 )
 
 # Add executable

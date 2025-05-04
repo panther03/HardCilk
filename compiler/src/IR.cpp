@@ -36,9 +36,9 @@ Sym PutSym(std::string Name) {
 
 void IndexIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx) {
   assert(Ind);
-  Out << "&(" << GetSym(Arr->Name) << "[";
+  Out << GetSym(Arr->Name) << "[";
   Ind->print(Out, Ctx);
-  Out << "])";
+  Out << "]";
 }
 
 IRExpr* IndexIRExpr::clone() {
@@ -91,7 +91,7 @@ IRExpr* AccessIRExpr::clone() {
 
 void IdentIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   assert(Ident);
-  Out << GetSym(Ident->Name);
+  Ident->Parent->printVar(Out, Ident);
 }
 
 IRExpr* IdentIRExpr::clone() {
@@ -121,8 +121,11 @@ void LiteralIRExpr::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   llvm::raw_string_ostream LitOS(LitS);
 
   Lit->printPretty(LitOS, nullptr, Ctx.ASTCtx.getPrintingPolicy());
-  std::regex re("(\")");
-  LitS = std::regex_replace(LitS, re, "\\$1");
+  if (Ctx.GraphVizEscapeChars) {
+    std::regex re("(\")");
+    LitS = std::regex_replace(LitS, re, "\\$1");
+  }
+  
   Out << LitS;
 }
 
@@ -297,7 +300,7 @@ void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
   Out << "espawn @";
   Dest->print(Out, Ctx);
   Out << " ";
-  Out << SN->Fn->getName();
+  Out << Fn->getName();
   Out << "(";
   bool first = true;
   for (auto &Arg : Args) {
@@ -308,7 +311,7 @@ void ESpawnIRStmt::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
     }
     Arg->print(Out, Ctx);
   }
-  Out << ")";
+  Out << ") [" << SN->Fn->getName() << "]";
 }
 
 IRStmt* ESpawnIRStmt::clone() {
@@ -316,7 +319,7 @@ IRStmt* ESpawnIRStmt::clone() {
   for (auto &Arg : Args) {
     NewArgs.push_back(Arg->clone());
   }
-  return new ESpawnIRStmt(dyn_cast<IRLvalExpr>(Dest->clone()), SN, NewArgs, Local);
+  return new ESpawnIRStmt(dyn_cast<IRLvalExpr>(Dest->clone()), Fn, SN, NewArgs, Local);
 }
 
 void ExprWrapIRStmt ::print(llvm::raw_ostream &Out, IRPrintContext &Ctx){
@@ -533,11 +536,7 @@ void IRFunction::print(llvm::raw_ostream &out, clang::ASTContext &Context) {
 
 void IRFunction::dumpGraph(llvm::raw_ostream &out, clang::ASTContext &Context) {
   out << "subgraph clusterfn" << Ind;
-  if (RootFun) {
-    out << "{\nlabel=\"" << RootFun->getName() << "\"\n";
-  } else {
-    out << "{\nlabel=\"fn" << Ind << "\"\n";
-  }
+  out << "{\nlabel=\"" << getName() << "\"\n";
 
   for (auto &B : Blocks) {
     auto *BB = B.get();
@@ -673,7 +672,7 @@ IRBasicBlock* FindJoin(IRBasicBlock* Left, IRBasicBlock *Right) {
 
 
 void ScopedIRTraverser::traverse(IRFunction &F) {
-  WorkList.push_back(WorkItem(F.entry()));
+  WorkList.push_back(WorkItem(F.getEntry()));
 
   while (!WorkList.empty()) {
     auto W = WorkList.back();

@@ -97,9 +97,10 @@ class Stmt2IRVisitor : public clang::StmtVisitor<Stmt2IRVisitor> {
         if (auto *VD= dyn_cast<ValueDecl>(D)) { 
           Sym VDS = PutSym(VD->getName().str());
           F->Vars.push_back(IRVarDecl {
-            .Type = VD->getType().getTypePtr(),
+            .Type = VD->getType(),
             .Name = VDS,
-            .DeclLoc = IRVarDecl::LOCAL
+            .DeclLoc = IRVarDecl::LOCAL,
+            .Parent = F
           });
           VR = &F->Vars.back();
           VarLookup[VD] = VR;
@@ -166,6 +167,7 @@ class Stmt2IRVisitor : public clang::StmtVisitor<Stmt2IRVisitor> {
       IRStmt *InitS = nullptr;
       if (CurrB->back()) {
         InitS = CurrB->back().get();
+        InitS->setSilent();
       }      
       
       CurrB = IncB;
@@ -174,6 +176,7 @@ class Stmt2IRVisitor : public clang::StmtVisitor<Stmt2IRVisitor> {
       IRStmt *IncS = nullptr;
       if (CurrB->back()) {
         IncS = CurrB->back().get();
+        IncS->setSilent();
       }
 
       IRExpr *Cond = nullptr;
@@ -457,13 +460,15 @@ public:
   bool VisitFunctionDecl(clang::FunctionDecl *Decl) { 
     if (Decl->getBody()) {
       IRFunction *F = P.createFunc(Decl->getName().str());
+      F->Info.RootFun = Decl;
       std::unordered_map<ASTVarRef, IRVarRef> VarLookup;
       for (auto *Param : Decl->parameters()) {
         Sym PSym = PutSym(Param->getName().str());
         F->Vars.push_back(IRVarDecl {
-          .Type = Param->getType().getTypePtr(),
+          .Type = Param->getType(),
           .Name = PSym,
-          .DeclLoc = IRVarDecl::ARG
+          .DeclLoc = IRVarDecl::ARG,
+          .Parent = F
         });
         VarLookup[Param] = &F->Vars.back();
       }
@@ -487,7 +492,9 @@ public:
       auto *FR = dyn_cast<FunctionDecl>(*VarRef); 
       assert(FR);
       if (FunLookup.find(FR) != FunLookup.end()) {
-        Node->Fn = FunLookup[FR];
+        auto *SpawnDest = FunLookup[FR];
+        Node->Fn = SpawnDest;
+        SpawnDest->Info.IsTask = true;
       }
     } else {
       llvm_unreachable("Expected an AST variable reference in ISpawnIRExpr");
